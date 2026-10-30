@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
 use std::fs;
+#[cfg(unix)]
 use std::io::Write;
 use std::path::PathBuf;
 
@@ -13,24 +14,25 @@ pub struct Config {
     pub token: Option<String>,
 }
 
-pub fn dir() -> PathBuf {
-    let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
-    PathBuf::from(home).join(".rust-keyrotation")
+/// 跨平台用户主目录：Windows 使用 USERPROFILE/Known Folder，Unix 使用 HOME。
+pub fn dir() -> Option<PathBuf> {
+    home::home_dir().map(|home| home.join(".rust-keyrotation"))
 }
 
-fn file() -> PathBuf {
-    dir().join("config.json")
+fn file() -> Option<PathBuf> {
+    dir().map(|dir| dir.join("config.json"))
 }
 
 pub fn load() -> Option<Config> {
-    let text = fs::read_to_string(file()).ok()?;
+    let path = file()?;
+    let text = fs::read_to_string(path).ok()?;
     serde_json::from_str(&text).ok()
 }
 
 pub fn save(cfg: &Config) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let dir = dir();
+    let dir = dir().ok_or("无法确定用户主目录")?;
     fs::create_dir_all(&dir)?;
-    let path = file();
+    let path = dir.join("config.json");
     let data = serde_json::to_vec_pretty(cfg)?;
     #[cfg(unix)]
     {

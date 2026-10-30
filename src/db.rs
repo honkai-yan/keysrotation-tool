@@ -82,8 +82,10 @@ impl Db {
     }
 
     pub fn update_desc(&self, id: i64, desc: &str) -> Res<()> {
-        self.conn
-            .execute("UPDATE entries SET desc = ?1 WHERE id = ?2", params![desc, id])?;
+        self.conn.execute(
+            "UPDATE entries SET desc = ?1 WHERE id = ?2",
+            params![desc, id],
+        )?;
         Ok(())
     }
 
@@ -99,5 +101,48 @@ impl Db {
         self.conn
             .execute("DELETE FROM entries WHERE id = ?1", params![id])?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn empty_db_serialize_roundtrip_keeps_schema() {
+        let mut db = Db::new_empty().expect("new empty db");
+        let bytes = db.to_bytes().expect("serialize");
+        assert!(bytes.starts_with(b"SQLite format 3\0"));
+
+        let mut conn = Connection::open_in_memory().expect("open");
+        conn.deserialize_read_exact("main", Cursor::new(&bytes), bytes.len(), false)
+            .expect("deserialize");
+        let tables: Vec<String> = conn
+            .prepare("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name")
+            .unwrap()
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert!(tables.iter().any(|t| t == "meta"));
+        assert!(tables.iter().any(|t| t == "entries"));
+
+        let db2 = Db::from_bytes(&bytes).expect("from bytes");
+        assert!(db2.entries().unwrap().is_empty());
+    }
+
+    #[test]
+    fn entry_roundtrip_keeps_rows() {
+        let mut db = Db::new_empty().expect("new empty db");
+        db.set_meta("salt", &[1u8; 16]).unwrap();
+        let id = db.insert("hello", "cipher").unwrap();
+        let bytes = db.to_bytes().unwrap();
+        let db2 = Db::from_bytes(&bytes).unwrap();
+        let rows = db2.entries().unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].id, id);
+        assert_eq!(rows[0].desc, "hello");
+        assert_eq!(rows[0].content, "cipher");
+        assert_eq!(db2.meta("salt").unwrap().unwrap(), vec![1u8; 16]);
     }
 }
