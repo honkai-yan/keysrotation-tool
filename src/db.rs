@@ -37,7 +37,7 @@ impl Db {
         Ok(Db { conn })
     }
 
-    pub fn to_bytes(&mut self) -> Res<Vec<u8>> {
+    pub fn export_bytes(&mut self) -> Res<Vec<u8>> {
         Ok(self.conn.serialize("main")?.to_vec())
     }
 
@@ -111,7 +111,7 @@ mod tests {
     #[test]
     fn empty_db_serialize_roundtrip_keeps_schema() {
         let mut db = Db::new_empty().expect("new empty db");
-        let bytes = db.to_bytes().expect("serialize");
+        let bytes = db.export_bytes().expect("serialize");
         assert!(bytes.starts_with(b"SQLite format 3\0"));
 
         let mut conn = Connection::open_in_memory().expect("open");
@@ -136,7 +136,7 @@ mod tests {
         let mut db = Db::new_empty().expect("new empty db");
         db.set_meta("salt", &[1u8; 16]).unwrap();
         let id = db.insert("hello", "cipher").unwrap();
-        let bytes = db.to_bytes().unwrap();
+        let bytes = db.export_bytes().unwrap();
         let db2 = Db::from_bytes(&bytes).unwrap();
         let rows = db2.entries().unwrap();
         assert_eq!(rows.len(), 1);

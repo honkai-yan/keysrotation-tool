@@ -1,6 +1,6 @@
 # 密钥轮换
 
-基于 [egui](https://github.com/emilk/egui) 的桌面小工具，用来维护一份加密的密钥库。
+基于 [gpui-kit](https://gpui-kit.com/) 的桌面小工具，用来维护一份加密的密钥库。
 
 - 密钥库是 WebDAV 服务器上的单个 SQLite 文件 `ptoolkit_keys.db`。
 - 每条密钥内容都经过对称加密后再保存。
@@ -23,8 +23,8 @@
 
 ## 环境要求
 
-- Rust 1.85 或更新版本（项目使用 edition 2024）。
-- Windows 或 macOS。
+- Rust stable（本轮验证版本 1.96.0；项目使用 edition 2024）。
+- Windows 或 macOS 15 及以上（gpui-kit 的平台要求）。
 - C 编译器。`rusqlite` 的 `bundled` 特性会编译内置的 SQLite；Windows 上安装 MSVC 生成工具即可，macOS 上执行 `xcode-select --install`。
 - 服务端：OpenList，并开启 WebDAV。使用的账号需要 WebDAV 的读取和管理（写入）权限，否则会返回 403。
 - 中文字体已内置在程序中（Noto Sans SC 的 GB2312 子集，SIL OFL 1.1），不依赖系统字体。
@@ -145,8 +145,9 @@ assets/
 ├── NotoSansSC-GB2312.otf   内置中文字体（GB2312 子集，SIL OFL 1.1）
 └── NotoSansSC-OFL.txt      字体许可证
 src/
-├── main.rs     程序入口与窗口设置
-├── app.rs      界面与业务逻辑：向导、登录、主页、自动同步、遮罩、状态栏
+├── main.rs     程序入口
+├── app.rs      业务状态：登录、内存数据库、自动同步、换密钥与失败恢复
+├── ui.rs       gpui-kit 窗口、页面、输入/焦点、表格、遮罩与状态栏
 ├── config.rs   ~/.rust-keyrotation/config.json 的读写
 ├── crypto.rs   Argon2id 密钥派生与 AES-256-GCM 加解密
 ├── db.rs       内存中的 SQLite 数据库
@@ -169,3 +170,16 @@ src/
 - 内置字体只覆盖 GB2312 与常用标点，生僻字可能显示为方框。
 - 没有多设备合并逻辑：服务器数据库始终是唯一权威版本，多设备同时修改时以后上传者为准。
 - 服务器数据库损坏时不会尝试从损坏文件里恢复数据：启动阶段会用新建的空库覆盖，运行阶段会用内存中现有的库覆盖修复。
+
+## 构建与清理约定
+
+日常使用 `cargo run`，构建、测试继续使用标准 Cargo 工作流。保留仓库根目录的
+`target/`，以复用依赖产物和增量编译缓存；开发、测试 profile 使用 Cargo 默认设置。
+
+“项目清理”指移除旧框架的废弃代码、资源和依赖，并更新 `Cargo.lock`。
+完成修改或测试后不要例行执行 `cargo clean`，也不需要复制二进制到 `dist/` 后清空缓存。
+如确需清理旧构建产物，应先确认具体归属和范围，避免删除仍在使用的依赖缓存。
+
+`vendor/gpui-pre-macos` 保留上游 Apache-2.0 许可证，并仅修复 0.3.10 中三处
+stable Rust 不支持的 `Option::map_or_default` 调用；详见其 `PATCH.md`。
+升级 gpui-kit 时需核对上游是否修复，再移除该 patch。

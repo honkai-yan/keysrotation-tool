@@ -4,11 +4,10 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+gpui-kit = "=0.8.1"
 aes-gcm = "0.11.1"
 argon2 = "0.6.0"
 base64 = "0.23.1"
-eframe = { version = "0.37.0", default-features = false, features = ["glow", "default_fonts", "clipboard"] }
-egui = "0.37.0"
 home = "0.5"
 sha2 = "0.10"
 rand = "0.10.3"
@@ -17,3 +16,13 @@ rusqlite = { version = "0.41.1", features = ["bundled", "serialize"] }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"
 url = "2.5.8"
+
+[profile.release]
+strip = "debuginfo"
+
+[patch.crates-io]
+# 0.3.10 uses unstable Option::map_or_default on macOS; stable equivalent only.
+gpui-pre-macos = { path = "vendor/gpui-pre-macos" }
+
+[dev-dependencies]
+gpui-kit = { version = "=0.8.1", features = ["test-support"] }

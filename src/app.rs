@@ -5,13 +5,8 @@ use crate::sync::{
     Command, ConnectFailure, ConnectOutcome, DownloadPurpose, Event, LoginFailure, SyncWorker,
     UploadPurpose,
 };
-use eframe::egui::{
-    self, Align, Align2, Color32, FontData, FontDefinitions, FontFamily, FontId, Key as EKey,
-    Label, Layout, Modal, Rect, RichText, Sense, Shape, Stroke, TextEdit, vec2,
-};
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
-use std::sync::Arc;
 use std::time::{Duration, Instant};
 use url::Url;
 
@@ -19,21 +14,12 @@ use url::Url;
 const REVEAL_TTL: Duration = Duration::from_secs(60);
 /// 用于校验对称密钥是否与数据库匹配的固定明文
 const VERIFY_TEXT: &str = "ptoolkit-ok";
-const MASK: &str = "****************";
-const ROW_H: f32 = 22.0;
 const POLL_INTERVAL: Duration = Duration::from_secs(2);
 const ADOPT_OVERLAY: Duration = Duration::from_millis(500);
 const RECOVERY_DELAY: Duration = Duration::from_millis(200);
-const FLASH: Duration = Duration::from_millis(400);
-
-/// Claude 主题色
-const CLAUDE: Color32 = Color32::from_rgb(0xD9, 0x77, 0x57);
-const CLAUDE_HOVER: Color32 = Color32::from_rgba_premultiplied(0x30, 0x18, 0x10, 0x30);
-const IVORY: Color32 = Color32::from_rgb(0xFA, 0xF9, 0xF5);
-const DANGER: Color32 = Color32::from_rgb(0xC0, 0x39, 0x2B);
 
 #[derive(PartialEq, Clone, Copy)]
-enum Page {
+pub(crate) enum Page {
     Wizard,
     Login,
     Main,
@@ -41,7 +27,7 @@ enum Page {
 }
 
 #[derive(PartialEq, Clone, Copy)]
-enum Field {
+pub(crate) enum Field {
     Desc,
     Content,
 }
@@ -56,23 +42,23 @@ enum SyncState {
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
-enum Overlay {
+pub(crate) enum Overlay {
     None,
     Busy,
     UploadFailed,
 }
 
-struct Revealed {
-    plain: String,
-    expires: Instant,
+pub(crate) struct Revealed {
+    pub(crate) plain: String,
+    pub(crate) expires: Instant,
     /// 编辑期间冻结倒计时时保存的剩余时间
-    paused_left: Option<Duration>,
+    pub(crate) paused_left: Option<Duration>,
 }
 
-struct Edit {
-    id: i64,
-    field: Field,
-    buf: String,
+pub(crate) struct Edit {
+    pub(crate) id: i64,
+    pub(crate) field: Field,
+    pub(crate) buf: String,
 }
 
 struct PendingKeyChange {
@@ -88,16 +74,6 @@ struct QueuedUpload {
 
 struct InFlightUpload {
     digest: [u8; 32],
-}
-
-enum Act {
-    Add,
-    Reveal(i64),
-    Edit(i64, Field),
-    Commit,
-    Cancel,
-    Copy(String),
-    RequestDelete(i64),
 }
 
 /// 自动同步轮询的纯决策结果，便于模型测试。
@@ -232,47 +208,17 @@ fn open_db(bytes: Option<Vec<u8>>, pass: &str) -> Result<(Db, Key, bool), DbOpen
     }
 }
 
-fn setup_fonts(ctx: &egui::Context) {
-    // 内置 Noto Sans SC 的 GB2312 子集；不使用系统字体 fallback。
-    let mut fonts = FontDefinitions::default();
-    fonts.font_data.insert(
-        "noto_sc".to_owned(),
-        Arc::new(FontData::from_static(include_bytes!(
-            "../assets/NotoSansSC-GB2312.otf"
-        ))),
-    );
-    for family in [FontFamily::Proportional, FontFamily::Monospace] {
-        fonts
-            .families
-            .entry(family)
-            .or_default()
-            .insert(0, "noto_sc".to_owned());
-    }
-    ctx.set_fonts(fonts);
-}
-
-fn setup_theme(ctx: &egui::Context) {
-    let mut v = egui::Visuals::light();
-    v.panel_fill = IVORY;
-    v.window_fill = IVORY;
-    v.selection.bg_fill = CLAUDE;
-    v.hyperlink_color = CLAUDE;
-    v.widgets.hovered.bg_stroke = Stroke::new(1.0, CLAUDE);
-    v.widgets.active.bg_stroke = Stroke::new(1.0, CLAUDE);
-    ctx.set_visuals(v);
-}
-
 pub struct App {
-    page: Page,
-    cfg: Config,
-    ctx: egui::Context,
-    worker: SyncWorker,
-    overlay: Overlay,
+    pub(crate) page: Page,
+    pub(crate) cfg: Config,
+    pub(crate) focused: bool,
+    pub(crate) worker: SyncWorker,
+    pub(crate) overlay: Overlay,
     overlay_until: Option<Instant>,
-    status: String,
-    status_flash: Option<Instant>,
-    auto_sync_notice: String,
-    auto_flash: Option<Instant>,
+    pub(crate) status: String,
+    pub(crate) status_flash: Option<Instant>,
+    pub(crate) auto_sync_notice: String,
+    pub(crate) auto_flash: Option<Instant>,
     auto_notice_pending: bool,
     pending_status_after_overlay: Option<String>,
     sync_state: SyncState,
@@ -281,31 +227,32 @@ pub struct App {
     poll_revision: u64,
     last_poll: Instant,
     recovery_due: Option<Instant>,
-    pending_delete: Option<i64>,
+    pub(crate) pending_delete: Option<i64>,
     pending_key_change: Option<PendingKeyChange>,
     queued_upload: Option<QueuedUpload>,
     in_flight_upload: Option<InFlightUpload>,
     /// 上一次修复性上传完成后要在状态栏显示的说明
     repair_note: Option<String>,
-    w_url: String,
-    w_key: String,
-    l_user: String,
-    l_pass: String,
-    url_buf: String,
-    port_buf: String,
-    key_buf: String,
+    pub(crate) w_url: String,
+    pub(crate) w_key: String,
+    pub(crate) l_user: String,
+    pub(crate) l_pass: String,
+    pub(crate) url_buf: String,
+    pub(crate) port_buf: String,
+    pub(crate) key_buf: String,
     db: Option<Db>,
     cipher: Option<Key>,
-    rows: Vec<Entry>,
-    revealed: HashMap<i64, Revealed>,
-    edit: Option<Edit>,
+    pub(crate) rows: Vec<Entry>,
+    pub(crate) revealed: HashMap<i64, Revealed>,
+    pub(crate) edit: Option<Edit>,
 }
 
 impl App {
-    pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
-        setup_fonts(&cc.egui_ctx);
-        setup_theme(&cc.egui_ctx);
-        let cfg = config::load().unwrap_or_default();
+    pub fn new() -> Self {
+        Self::from_config(config::load().unwrap_or_default())
+    }
+
+    pub(crate) fn from_config(cfg: Config) -> Self {
         let mut app = App {
             page: Page::Wizard,
             w_url: cfg.server_url.clone(),
@@ -315,8 +262,8 @@ impl App {
             url_buf: cfg.server_url.clone(),
             port_buf: port_of(&cfg.server_url),
             key_buf: String::new(),
-            ctx: cc.egui_ctx.clone(),
-            worker: SyncWorker::new(cc.egui_ctx.clone()),
+            focused: false,
+            worker: SyncWorker::new(),
             overlay: Overlay::None,
             overlay_until: None,
             status: String::new(),
@@ -360,7 +307,7 @@ impl App {
         }
     }
 
-    fn set_status(&mut self, text: impl Into<String>) {
+    pub(crate) fn set_status(&mut self, text: impl Into<String>) {
         self.status = text.into();
         self.status_flash = Some(Instant::now());
     }
@@ -388,7 +335,7 @@ impl App {
         }
     }
 
-    fn start_connect(&mut self, use_saved_credentials: bool) {
+    pub(crate) fn start_connect(&mut self, use_saved_credentials: bool) {
         let Some(dav) = self.dav_url() else {
             self.set_status("服务器地址不合法");
             self.page = Page::Wizard;
@@ -416,7 +363,7 @@ impl App {
         });
     }
 
-    fn login(&mut self) {
+    pub(crate) fn login(&mut self) {
         let Some(dav) = self.dav_url() else {
             self.set_status("服务器地址不合法");
             return;
@@ -435,7 +382,7 @@ impl App {
         });
     }
 
-    fn handle_event(&mut self, event: Event) {
+    pub(crate) fn handle_event(&mut self, event: Event) {
         let current_epoch = self.worker.epoch();
         match event {
             Event::Connect { epoch, result } => {
@@ -591,7 +538,7 @@ impl App {
         let Some(db) = self.db.as_mut() else {
             return;
         };
-        let bytes = match db.to_bytes() {
+        let bytes = match db.export_bytes() {
             Ok(bytes) => bytes,
             Err(e) => {
                 self.set_status(format!("导出数据库失败: {e}"));
@@ -674,7 +621,6 @@ impl App {
         self.overlay_until = None;
         self.recovery_due = Some(Instant::now() + RECOVERY_DELAY);
         self.set_status("上传数据库失败");
-        self.ctx.request_repaint_after(RECOVERY_DELAY);
     }
 
     fn handle_poll(&mut self, bytes: Option<Vec<u8>>) {
@@ -757,7 +703,7 @@ impl App {
         self.upload_current_db(UploadPurpose::Repair);
     }
 
-    fn tick_sync(&mut self) {
+    pub(crate) fn tick_sync(&mut self) {
         let now = Instant::now();
         if let Some(until) = self.overlay_until
             && now >= until
@@ -798,7 +744,7 @@ impl App {
         {
             return;
         }
-        if !self.ctx.input(|i| i.focused) {
+        if !self.focused {
             return;
         }
         if let Some(queued) = self.queued_upload.take() {
@@ -849,7 +795,7 @@ impl App {
         self.set_status(reason);
     }
 
-    fn logout(&mut self) {
+    pub(crate) fn logout(&mut self) {
         self.reset_to_wizard("已退出登录");
     }
 
@@ -869,7 +815,7 @@ impl App {
         self.local_revision = self.local_revision.wrapping_add(1);
     }
 
-    fn apply_url(&mut self) {
+    pub(crate) fn apply_url(&mut self) {
         let url = self.url_buf.trim().to_string();
         if url == self.cfg.server_url {
             return;
@@ -904,7 +850,7 @@ impl App {
         self.start_connect(false);
     }
 
-    fn change_key(&mut self, new_pass: String) {
+    pub(crate) fn change_key(&mut self, new_pass: String) {
         if new_pass == self.cfg.sym_key {
             self.key_buf.clear();
             return;
@@ -921,7 +867,7 @@ impl App {
             return;
         };
         let old_bytes = match self.db.as_mut() {
-            Some(db) => match db.to_bytes() {
+            Some(db) => match db.export_bytes() {
                 Ok(bytes) => bytes,
                 Err(e) => {
                     self.set_status(format!("读取数据库失败: {e}"));
@@ -987,7 +933,7 @@ impl App {
             self.set_status(format!("写入数据库失败: {e}"));
             return;
         }
-        let bytes = match staged.to_bytes() {
+        let bytes = match staged.export_bytes() {
             Ok(bytes) => bytes,
             Err(e) => {
                 self.set_status(format!("导出数据库失败: {e}"));
@@ -1009,13 +955,13 @@ impl App {
         self.start_upload(bytes, UploadPurpose::KeyChange);
     }
 
-    fn expire_reveals(&mut self) {
+    pub(crate) fn expire_reveals(&mut self) {
         let now = Instant::now();
         self.revealed
             .retain(|_, r| r.paused_left.is_some() || r.expires > now);
     }
 
-    fn reveal(&mut self, id: i64) {
+    pub(crate) fn reveal(&mut self, id: i64) {
         let (Some(key), Some(row)) = (self.cipher, self.rows.iter().find(|r| r.id == id)) else {
             return;
         };
@@ -1034,7 +980,7 @@ impl App {
         }
     }
 
-    fn start_edit(&mut self, id: i64, field: Field) {
+    pub(crate) fn start_edit(&mut self, id: i64, field: Field) {
         self.cancel_edit();
         let buf = match field {
             Field::Desc => match self.rows.iter().find(|r| r.id == id) {
@@ -1052,7 +998,7 @@ impl App {
         self.edit = Some(Edit { id, field, buf });
     }
 
-    fn cancel_edit(&mut self) {
+    pub(crate) fn cancel_edit(&mut self) {
         if let Some(ed) = self.edit.take()
             && ed.field == Field::Content
             && let Some(r) = self.revealed.get_mut(&ed.id)
@@ -1062,7 +1008,7 @@ impl App {
         }
     }
 
-    fn commit_edit(&mut self) {
+    pub(crate) fn commit_edit(&mut self) {
         let Some(ed) = self.edit.take() else {
             return;
         };
@@ -1102,7 +1048,7 @@ impl App {
         self.upload_current_db(UploadPurpose::Edit);
     }
 
-    fn add_row(&mut self) {
+    pub(crate) fn add_row(&mut self) {
         let Some(key) = self.cipher else { return };
         let Some(db) = &self.db else { return };
         let id = match crypto::encrypt(&key, "").and_then(|enc| db.insert("", &enc)) {
@@ -1118,7 +1064,7 @@ impl App {
         self.upload_current_db(UploadPurpose::Edit);
     }
 
-    fn delete_row(&mut self, id: i64) {
+    pub(crate) fn delete_row(&mut self, id: i64) {
         let Some(db) = &self.db else { return };
         if let Err(e) = db.delete(id) {
             self.set_status(format!("删除失败: {e}"));
@@ -1133,50 +1079,7 @@ impl App {
         self.upload_current_db(UploadPurpose::Edit);
     }
 
-    fn apply(&mut self, act: Act) {
-        match act {
-            Act::Add => self.add_row(),
-            Act::Reveal(id) => self.reveal(id),
-            Act::Edit(id, field) => self.start_edit(id, field),
-            Act::Commit => self.commit_edit(),
-            Act::Cancel => self.cancel_edit(),
-            Act::Copy(text) => {
-                self.ctx.copy_text(text);
-                self.set_status("复制成功");
-            }
-            Act::RequestDelete(id) => self.pending_delete = Some(id),
-        }
-    }
-
-    fn wizard_ui(&mut self, ui: &mut egui::Ui) {
-        ui.heading("配置向导");
-        ui.add_space(12.0);
-        egui::Grid::new("wizard_form")
-            .num_columns(2)
-            .spacing([12.0, 10.0])
-            .show(ui, |ui| {
-                ui.label("服务器地址");
-                ui.add(
-                    TextEdit::singleline(&mut self.w_url)
-                        .desired_width(420.0)
-                        .hint_text("http://host:port/dav/"),
-                );
-                ui.end_row();
-                ui.label("对称加密密钥");
-                ui.add(
-                    TextEdit::singleline(&mut self.w_key)
-                        .password(true)
-                        .desired_width(420.0),
-                );
-                ui.end_row();
-            });
-        ui.add_space(12.0);
-        if ui.button("确认").clicked() {
-            self.wizard_confirm();
-        }
-    }
-
-    fn wizard_confirm(&mut self) {
+    pub(crate) fn wizard_confirm(&mut self) {
         let url = self.w_url.trim().to_string();
         if !valid_url(&url) {
             self.set_status("服务器地址不合法");
@@ -1201,388 +1104,21 @@ impl App {
         self.port_buf = port_of(&url);
         self.start_connect(true);
     }
-
-    fn login_ui(&mut self, ui: &mut egui::Ui) {
-        ui.heading("登录");
-        ui.add_space(12.0);
-        egui::Grid::new("login_form")
-            .num_columns(2)
-            .spacing([12.0, 10.0])
-            .show(ui, |ui| {
-                ui.label("账号");
-                ui.add(TextEdit::singleline(&mut self.l_user).desired_width(320.0));
-                ui.end_row();
-                ui.label("密码");
-                let pass = ui.add(
-                    TextEdit::singleline(&mut self.l_pass)
-                        .password(true)
-                        .desired_width(320.0),
-                );
-                ui.end_row();
-                if pass.lost_focus() && ui.input(|i| i.key_pressed(EKey::Enter)) {
-                    self.login();
-                }
-            });
-        ui.add_space(12.0);
-        if ui.button("登录").clicked() {
-            self.login();
-        }
-    }
-
-    fn retry_ui(&mut self, ui: &mut egui::Ui) {
-        ui.heading("连接失败");
-        ui.add_space(12.0);
-        ui.label(&self.status);
-        ui.add_space(12.0);
-        ui.horizontal(|ui| {
-            if ui.button("重试").clicked() {
-                self.start_connect(true);
-            }
-            if ui.button("修改配置").clicked() {
-                self.w_url = self.cfg.server_url.clone();
-                self.w_key.clear();
-                self.page = Page::Wizard;
-            }
-        });
-    }
-
-    fn main_ui(&mut self, ui: &mut egui::Ui) {
-        egui::Panel::top("top_bar").show(ui, |ui| {
-            ui.add_space(4.0);
-            ui.horizontal(|ui| {
-                ui.label("服务器地址");
-                let url = ui.add(TextEdit::singleline(&mut self.url_buf).desired_width(300.0));
-                if url.changed() {
-                    self.port_buf = port_of(&self.url_buf);
-                }
-                ui.label("端口");
-                let port = ui.add(TextEdit::singleline(&mut self.port_buf).desired_width(60.0));
-                if port.changed()
-                    && let (Ok(p), Ok(mut u)) =
-                        (self.port_buf.parse::<u16>(), Url::parse(&self.url_buf))
-                    && u.set_port(Some(p)).is_ok()
-                {
-                    self.url_buf = u.to_string();
-                }
-                if url.lost_focus() || port.lost_focus() {
-                    self.apply_url();
-                }
-
-                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                    let key = ui.add(
-                        TextEdit::singleline(&mut self.key_buf)
-                            .password(true)
-                            .hint_text("输入新密钥后回车")
-                            .desired_width(200.0),
-                    );
-                    ui.label("对称加密密钥");
-                    if key.lost_focus()
-                        && ui.input(|i| i.key_pressed(EKey::Enter))
-                        && !self.key_buf.is_empty()
-                    {
-                        let pass = std::mem::take(&mut self.key_buf);
-                        self.change_key(pass);
-                    }
-                });
-            });
-            ui.add_space(4.0);
-        });
-
-        egui::CentralPanel::default().show(ui, |ui| {
-            let mut add = false;
-            let mut logout = false;
-            ui.horizontal(|ui| {
-                if ui.button("新增").clicked() {
-                    add = true;
-                }
-                ui.label(format!("共 {} 条", self.rows.len()));
-                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                    if ui.button("退出登录").clicked() {
-                        logout = true;
-                    }
-                });
-            });
-            if logout {
-                self.logout();
-                return;
-            }
-            if add {
-                self.apply(Act::Add);
-            }
-            ui.separator();
-
-            let total = ui.available_width();
-            let w_desc = (total * 0.4).floor();
-            let w_content = total - w_desc - ui.spacing().item_spacing.x;
-            ui.horizontal(|ui| {
-                ui.add_sized([w_desc, ROW_H], Label::new(RichText::new("描述").strong()));
-                ui.add_sized(
-                    [w_content, ROW_H],
-                    Label::new(RichText::new("内容").strong()),
-                );
-            });
-            ui.separator();
-
-            let rows = self.rows.clone();
-            let mut acts = Vec::new();
-            egui::ScrollArea::vertical()
-                .auto_shrink([false, false])
-                .show(ui, |ui| {
-                    for e in &rows {
-                        acts.extend(self.row_ui(ui, e, w_desc, w_content));
-                    }
-                });
-            for act in acts {
-                self.apply(act);
-            }
-        });
-    }
-
-    fn row_ui(&mut self, ui: &mut egui::Ui, e: &Entry, w_desc: f32, w_content: f32) -> Vec<Act> {
-        let mut acts = Vec::new();
-        let editing_this = self.edit.as_ref().is_some_and(|ed| ed.id == e.id);
-        let bg = ui.painter().add(Shape::Noop);
-        let row = ui.horizontal(|ui| {
-            // 描述：双击编辑，右键删除
-            if self
-                .edit
-                .as_ref()
-                .is_some_and(|ed| ed.id == e.id && ed.field == Field::Desc)
-            {
-                let ed = self.edit.as_mut().unwrap();
-                let r = ui.add_sized([w_desc, ROW_H], TextEdit::singleline(&mut ed.buf));
-                edit_keys(&r, &mut acts);
-            } else {
-                let r = ui.add_sized(
-                    [w_desc, ROW_H],
-                    Label::new(e.desc.as_str()).sense(Sense::click()),
-                );
-                if r.double_clicked() {
-                    acts.push(Act::Edit(e.id, Field::Desc));
-                }
-                if !editing_this {
-                    r.context_menu(|ui| {
-                        if ui.button("删除").clicked() {
-                            acts.push(Act::RequestDelete(e.id));
-                            ui.close();
-                        }
-                    });
-                }
-            }
-
-            // 内容：未解密显示 *，点击解密；解密后双击编辑，右键复制
-            if self
-                .edit
-                .as_ref()
-                .is_some_and(|ed| ed.id == e.id && ed.field == Field::Content)
-            {
-                let ed = self.edit.as_mut().unwrap();
-                let r = ui.add_sized([w_content, ROW_H], TextEdit::singleline(&mut ed.buf));
-                edit_keys(&r, &mut acts);
-            } else if let Some(rv) = self.revealed.get(&e.id) {
-                let r = ui.add_sized(
-                    [w_content, ROW_H],
-                    Label::new(rv.plain.as_str()).sense(Sense::click()),
-                );
-                if r.double_clicked() {
-                    acts.push(Act::Edit(e.id, Field::Content));
-                }
-                if !editing_this && r.secondary_clicked() {
-                    acts.push(Act::Copy(rv.plain.clone()));
-                }
-            } else {
-                let r = ui.add_sized([w_content, ROW_H], Label::new(MASK).sense(Sense::click()));
-                if r.clicked() {
-                    acts.push(Act::Reveal(e.id));
-                }
-            }
-        });
-
-        // 鼠标悬停时整行高亮
-        let rect = row.response.rect;
-        if ui.rect_contains_pointer(rect) {
-            ui.painter()
-                .set(bg, Shape::rect_filled(rect, 4.0, CLAUDE_HOVER));
-        }
-        acts
-    }
-
-    fn delete_modal(&mut self, ctx: &egui::Context) {
-        let Some(id) = self.pending_delete else {
-            return;
-        };
-        let mut confirm = false;
-        let mut cancel = false;
-        let modal = Modal::new(egui::Id::unique("delete_confirm")).show(ctx, |ui| {
-            ui.set_width(360.0);
-            ui.heading("删除密钥");
-            ui.add_space(10.0);
-            ui.label("确定删除该密钥吗？");
-            ui.add_space(14.0);
-            ui.horizontal(|ui| {
-                if ui.button("取消").clicked() {
-                    cancel = true;
-                }
-                if ui
-                    .add(
-                        egui::Button::new(RichText::new("删除").color(Color32::WHITE)).fill(DANGER),
-                    )
-                    .clicked()
-                {
-                    confirm = true;
-                }
-            });
-        });
-        if modal.should_close() {
-            cancel = true;
-        }
-        if confirm {
-            self.pending_delete = None;
-            self.delete_row(id);
-        } else if cancel {
-            self.pending_delete = None;
-        }
-    }
-
-    fn flash_color(&self, started: Option<Instant>, normal: Color32) -> Color32 {
-        match started {
-            Some(t) if t.elapsed() < FLASH => {
-                if (t.elapsed().as_millis() / 100) % 2 == 0 {
-                    CLAUDE
-                } else {
-                    normal
-                }
-            }
-            _ => normal,
-        }
-    }
-
-    fn status_bar(&self, ui: &mut egui::Ui) {
-        egui::Panel::bottom("status_bar").show(ui, |ui| {
-            ui.add_space(3.0);
-            ui.horizontal(|ui| {
-                let normal = ui.visuals().text_color();
-                if !self.status.is_empty() {
-                    let color = self.flash_color(self.status_flash, normal);
-                    ui.label(RichText::new(&self.status).color(color));
-                }
-                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                    if !self.auto_sync_notice.is_empty() {
-                        let color = self.flash_color(self.auto_flash, normal);
-                        ui.label(RichText::new(&self.auto_sync_notice).color(color));
-                    }
-                });
-            });
-            ui.add_space(3.0);
-        });
-    }
-
-    fn overlay_ui(&self, ui: &mut egui::Ui) {
-        let screen: Rect = ui.ctx().content_rect();
-        egui::Area::new(ui.scope_id().with("busy_overlay"))
-            .order(egui::Order::Foreground)
-            .fixed_pos(screen.min)
-            .show(ui.ctx(), |ui| {
-                ui.set_clip_rect(screen);
-                ui.allocate_rect(screen, Sense::click_and_drag());
-                ui.painter()
-                    .rect_filled(screen, 0.0, Color32::from_black_alpha(150));
-                let center = screen.center();
-                match self.overlay {
-                    Overlay::Busy => {
-                        let spinner_rect = Rect::from_center_size(center, vec2(48.0, 48.0));
-                        ui.put(spinner_rect, egui::Spinner::new().size(40.0).color(CLAUDE));
-                    }
-                    Overlay::UploadFailed => {
-                        let x_center = center - vec2(0.0, 36.0);
-                        let stroke = Stroke::new(7.0, Color32::from_rgb(0xE0, 0x4B, 0x4B));
-                        ui.painter().line_segment(
-                            [x_center + vec2(-18.0, -18.0), x_center + vec2(18.0, 18.0)],
-                            stroke,
-                        );
-                        ui.painter().line_segment(
-                            [x_center + vec2(18.0, -18.0), x_center + vec2(-18.0, 18.0)],
-                            stroke,
-                        );
-                        ui.painter().text(
-                            center + vec2(0.0, 22.0),
-                            Align2::CENTER_CENTER,
-                            "上传失败，请等待自动同步恢复",
-                            FontId::proportional(18.0),
-                            Color32::WHITE,
-                        );
-                    }
-                    Overlay::None => {}
-                }
-            });
-    }
-
-    fn schedule_repaint(&self) {
-        let now = Instant::now();
-        if self
-            .status_flash
-            .is_some_and(|t| now.duration_since(t) < FLASH)
-            || self
-                .auto_flash
-                .is_some_and(|t| now.duration_since(t) < FLASH)
-        {
-            self.ctx.request_repaint_after(Duration::from_millis(50));
-        }
-        if let Some(until) = self.overlay_until {
-            self.ctx
-                .request_repaint_after(until.saturating_duration_since(now));
-        }
-        if let Some(due) = self.recovery_due {
-            self.ctx
-                .request_repaint_after(due.saturating_duration_since(now));
-        }
-        if self.page == Page::Main && self.overlay == Overlay::None {
-            self.ctx.request_repaint_after(POLL_INTERVAL);
-        }
-    }
 }
 
-/// 单行编辑框的键盘处理：回车提交，Esc 取消
-fn edit_keys(r: &egui::Response, acts: &mut Vec<Act>) {
-    if !r.has_focus() {
-        r.request_focus();
-    }
-    let (enter, esc) = r
-        .ctx
-        .input(|i| (i.key_pressed(EKey::Enter), i.key_pressed(EKey::Escape)));
-    if enter {
-        acts.push(Act::Commit);
-    } else if esc {
-        acts.push(Act::Cancel);
-    }
-}
-
-impl eframe::App for App {
-    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
-        while let Some(event) = self.worker.try_recv() {
-            self.handle_event(event);
-        }
-        self.expire_reveals();
-        self.tick_sync();
-
-        self.status_bar(ui);
-        let page = self.page;
-        egui::CentralPanel::default().show(ui, |ui| {
-            ui.add_enabled_ui(self.overlay == Overlay::None, |ui| match page {
-                Page::Wizard => self.wizard_ui(ui),
-                Page::Login => self.login_ui(ui),
-                Page::Main => self.main_ui(ui),
-                Page::Retry => self.retry_ui(ui),
-            });
-        });
-
-        if self.overlay == Overlay::None {
-            self.delete_modal(ui.ctx());
-        }
-        if self.overlay != Overlay::None {
-            self.overlay_ui(ui);
-        }
-        self.schedule_repaint();
+#[cfg(test)]
+impl App {
+    pub(crate) fn test_vault() -> Self {
+        let mut app = Self::from_config(Config::default());
+        app.cfg.sym_key = "synthetic-test-key".into();
+        let (db, key, _) = open_db(None, &app.cfg.sym_key).unwrap();
+        db.insert(
+            "测试条目",
+            &crypto::encrypt(&key, "synthetic secret").unwrap(),
+        )
+        .unwrap();
+        app.install_db(db, key, None);
+        app
     }
 }
 
@@ -1603,7 +1139,7 @@ mod tests {
         assert!(created);
         assert_eq!(key.len(), 32);
         db.set_meta("note", b"value").unwrap();
-        let bytes = db.to_bytes().unwrap();
+        let bytes = db.export_bytes().unwrap();
 
         let (db2, key2, created2) = open_db(Some(bytes.clone()), "correct horse").expect("open");
         assert!(!created2);
@@ -1627,7 +1163,7 @@ mod tests {
     #[test]
     fn poll_model_matches_digest_and_recovery_rules() {
         let (mut db, _key, _) = open_db(None, "pass").unwrap();
-        let bytes = db.to_bytes().unwrap();
+        let bytes = db.export_bytes().unwrap();
         let digest = digest_bytes(&bytes);
 
         assert!(matches!(
@@ -1672,7 +1208,7 @@ mod tests {
 
         // 服务器仍是旧密钥的库：采用服务器版本
         let (mut db, _, _) = open_db(None, "old").unwrap();
-        let old_bytes = db.to_bytes().unwrap();
+        let old_bytes = db.export_bytes().unwrap();
         assert!(matches!(
             evaluate_recovery(Some(&old_bytes), "old", Some("new")),
             RecoveryAction::AdoptOld(..)
@@ -1680,7 +1216,7 @@ mod tests {
 
         // MOVE 已成功但响应丢失：服务器库已用新密钥，用新密钥打开并提交
         let (mut db2, _, _) = open_db(None, "new").unwrap();
-        let new_bytes = db2.to_bytes().unwrap();
+        let new_bytes = db2.export_bytes().unwrap();
         assert!(matches!(
             evaluate_recovery(Some(&new_bytes), "old", Some("new")),
             RecoveryAction::AdoptNew(..)

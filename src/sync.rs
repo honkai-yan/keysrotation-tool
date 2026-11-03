@@ -1,5 +1,4 @@
 use crate::webdav;
-use eframe::egui;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
@@ -112,7 +111,7 @@ pub struct SyncWorker {
 }
 
 impl SyncWorker {
-    pub fn new(ctx: egui::Context) -> Self {
+    pub fn new() -> Self {
         let (tx, cmd_rx) = mpsc::channel::<Command>();
         let (event_tx, rx) = mpsc::channel::<Event>();
         let epoch = Arc::new(AtomicU64::new(0));
@@ -127,7 +126,6 @@ impl SyncWorker {
                 if event_tx.send(event).is_err() {
                     break;
                 }
-                ctx.request_repaint();
             }
         });
 
