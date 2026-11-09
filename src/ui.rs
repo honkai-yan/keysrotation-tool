@@ -1,4 +1,5 @@
 use crate::app::{App as Model, Field, Overlay, Page};
+use gpui_kit::base::Disableable;
 use gpui_kit::{
     component::{
         button::*,
@@ -34,6 +35,8 @@ enum FormField {
     WizardKey,
     User,
     Password,
+    WizardPublicKey,
+    WizardCaFile,
 }
 
 pub struct Desktop {
@@ -56,6 +59,8 @@ impl Desktop {
             FormField::WizardKey,
             FormField::User,
             FormField::Password,
+            FormField::WizardPublicKey,
+            FormField::WizardCaFile,
         ];
         let mut inputs = Vec::new();
         let mut subscriptions = Vec::new();
@@ -80,7 +85,24 @@ impl Desktop {
                         InputEvent::Change => {
                             let value = input.read(cx).value().to_string();
                             *Self::value_mut(&mut this.model, field) = value;
-                            if matches!(field, FormField::Server) {
+                            if matches!(field, FormField::WizardServer) {
+                                let endpoint =
+                                    keyrotation_transport::Endpoint::parse(&this.model.w_url).ok();
+                                this.model.w_public_key = endpoint
+                                    .as_ref()
+                                    .and_then(|url| {
+                                        this.model.cfg.trusted_servers.get(url.as_str())
+                                    })
+                                    .cloned()
+                                    .unwrap_or_default();
+                                this.model.w_ca_file = endpoint
+                                    .as_ref()
+                                    .and_then(|url| {
+                                        this.model.cfg.trusted_ca_files.get(url.as_str())
+                                    })
+                                    .cloned()
+                                    .unwrap_or_default();
+                            } else if matches!(field, FormField::Server) {
                                 this.model.port_buf = Url::parse(&this.model.url_buf)
                                     .ok()
                                     .and_then(|u| u.port_or_known_default())
@@ -104,9 +126,10 @@ impl Desktop {
                                     this.model.change_key(key);
                                 }
                             }
-                            FormField::WizardServer | FormField::WizardKey => {
-                                this.model.wizard_confirm()
-                            }
+                            FormField::WizardServer
+                            | FormField::WizardKey
+                            | FormField::WizardPublicKey
+                            | FormField::WizardCaFile => this.model.wizard_confirm(),
                             FormField::User | FormField::Password => this.model.login(),
                         },
                         InputEvent::Blur
@@ -180,6 +203,8 @@ impl Desktop {
             FormField::WizardKey => &m.w_key,
             FormField::User => &m.l_user,
             FormField::Password => &m.l_pass,
+            FormField::WizardPublicKey => &m.w_public_key,
+            FormField::WizardCaFile => &m.w_ca_file,
         }
     }
     fn value_mut(m: &mut Model, f: FormField) -> &mut String {
@@ -191,6 +216,8 @@ impl Desktop {
             FormField::WizardKey => &mut m.w_key,
             FormField::User => &mut m.l_user,
             FormField::Password => &mut m.l_pass,
+            FormField::WizardPublicKey => &mut m.w_public_key,
+            FormField::WizardCaFile => &mut m.w_ca_file,
         }
     }
     fn blocked(&self) -> bool {
@@ -206,6 +233,8 @@ impl Desktop {
             FormField::WizardKey,
             FormField::User,
             FormField::Password,
+            FormField::WizardPublicKey,
+            FormField::WizardCaFile,
         ]
         .into_iter()
         .enumerate()
@@ -265,6 +294,17 @@ impl Desktop {
     }
 
     fn cell(&self, id: i64, field: Field, text: String, cx: &mut Context<Self>) -> AnyElement {
+        if field == Field::Content && self.model.reading.contains(&id) {
+            return div()
+                .flex_1()
+                .px_3()
+                .py_2()
+                .flex()
+                .gap_2()
+                .child(Spinner::new())
+                .child("加载中")
+                .into_any_element();
+        }
         if let Some((edit_id, edit_field, input, _)) = &self.editor
             && *edit_id == id
             && *edit_field == field
@@ -363,7 +403,7 @@ impl Desktop {
                     .border_b_1()
                     .border_color(rgb(0xeae6df))
                     .hover(|style| style.bg(rgb(0xf1e6de)))
-                    .child(self.cell(row.id, Field::Desc, row.desc.clone(), cx))
+                    .child(self.cell(row.id, Field::Desc, row.description.clone(), cx))
                     .child(self.cell(row.id, Field::Content, content, cx)),
             );
         }
@@ -466,6 +506,11 @@ impl Render for Desktop {
                 .child(div().text_xl().child("配置向导"))
                 .child(self.form_row("服务器地址", 3))
                 .child(self.form_row("对称加密密钥", 4))
+                .child(if self.model.w_url.trim().starts_with("http://") {
+                    self.form_row("可信服务端公钥", 7).into_any_element()
+                } else {
+                    self.form_row("可信 CA 文件（可选）", 8).into_any_element()
+                })
                 .child(
                     Button::new("confirm")
                         .primary()
@@ -493,6 +538,24 @@ impl Render for Desktop {
                         .on_click(cx.listener(|this, _, _, cx| {
                             if !this.blocked() {
                                 this.model.login();
+                                cx.notify();
+                            }
+                        })),
+                )
+                .into_any_element(),
+            Page::Initialize => div()
+                .flex()
+                .flex_col()
+                .gap_4()
+                .child("服务器数据库尚未初始化")
+                .child("确认使用当前内容密钥创建空密钥库？")
+                .child(
+                    Button::new("initialize-vault")
+                        .primary()
+                        .label("初始化")
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            if !this.blocked() {
+                                this.model.initialize_vault();
                                 cx.notify();
                             }
                         })),
@@ -567,10 +630,35 @@ impl Render for Desktop {
                     .py_2()
                     .border_t_1()
                     .border_color(rgb(0xe3ded6))
-                    .child(Self::notice(
-                        self.model.status.clone(),
-                        self.model.status_flash,
-                    ))
+                    .child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .gap_1()
+                            .child(Self::notice(
+                                self.model.status.clone(),
+                                self.model.status_flash,
+                            ))
+                            .when_some(self.model.config_error.clone(), |this, error| {
+                                this.child(
+                                    div()
+                                        .flex()
+                                        .gap_2()
+                                        .items_center()
+                                        .text_color(rgb(0xc24e3a))
+                                        .child(error)
+                                        .child(
+                                            Button::new("retry-save-config")
+                                                .label("重试保存配置")
+                                                .disabled(self.blocked())
+                                                .on_click(cx.listener(|this, _, _, cx| {
+                                                    this.model.retry_save_config();
+                                                    cx.notify();
+                                                })),
+                                        ),
+                                )
+                            }),
+                    )
                     .child(Self::notice(
                         self.model.auto_sync_notice.clone(),
                         self.model.auto_flash,
@@ -590,8 +678,23 @@ impl Render for Desktop {
                 .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                 .on_key_down(|_, _, cx| cx.stop_propagation());
             if self.model.overlay == Overlay::Busy {
-                overlay = overlay.child(Spinner::new().color(rgb(ACCENT).into()));
-            } else if self.model.overlay == Overlay::UploadFailed {
+                overlay = overlay.child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .items_center()
+                        .gap_4()
+                        .child(Spinner::new().color(rgb(ACCENT).into()))
+                        .when(self.model.can_cancel_rotation(), |this| {
+                            this.child(Button::new("cancel-rotation").label("取消轮换").on_click(
+                                cx.listener(|this, _, _, cx| {
+                                    this.model.cancel_rotation();
+                                    cx.notify();
+                                }),
+                            ))
+                        }),
+                );
+            } else if self.model.overlay == Overlay::Resolving {
                 overlay = overlay.child(
                     div()
                         .flex()
@@ -600,7 +703,35 @@ impl Render for Desktop {
                         .gap_4()
                         .text_color(rgb(0xffffff))
                         .child(div().text_3xl().text_color(rgb(0xe04b4b)).child("×"))
-                        .child("上传失败，请等待自动同步恢复"),
+                        .child(self.model.status.clone())
+                        .when(self.model.can_cancel_rotation(), |this| {
+                            this.child(
+                                Button::new("cancel-unconfirmed-rotation")
+                                    .label("取消轮换")
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.model.cancel_rotation();
+                                        cx.notify();
+                                    })),
+                            )
+                        })
+                        .child(
+                            Button::new("resolve-retry")
+                                .label(if self.model.pending_expired() {
+                                    "重新加载"
+                                } else {
+                                    "重试"
+                                })
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.model.retry_pending();
+                                    cx.notify();
+                                })),
+                        )
+                        .child(Button::new("resolve-logout").label("退出登录").on_click(
+                            cx.listener(|this, _, _, cx| {
+                                this.model.logout();
+                                cx.notify();
+                            }),
+                        )),
                 );
             } else if let Some(id) = self.model.pending_delete {
                 overlay = overlay.child(
@@ -830,7 +961,7 @@ mod tests {
         });
         let (view, cx) =
             cx.add_window_view(|window, cx| Desktop::with_model(Model::test_vault(), window, cx));
-        for (index, overlay) in [Overlay::None, Overlay::Busy, Overlay::UploadFailed]
+        for (index, overlay) in [Overlay::None, Overlay::Busy, Overlay::Resolving]
             .into_iter()
             .enumerate()
         {

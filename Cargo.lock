@@ -6558,16 +6558,21 @@ version = "0.1.0"
 dependencies = [
  "aes-gcm 0.11.1",
  "argon2",
+ "axum-server",
  "base64 0.23.1",
  "gpui-kit",
  "home",
+ "keyrotation-protocol",
+ "keyrotation-server",
+ "keyrotation-transport",
  "rand 0.10.3",
- "reqwest",
  "rusqlite",
  "serde",
  "serde_json",
- "sha2 0.10.9",
+ "tempfile",
+ "tokio",
  "url",
+ "zeroize",
 ]
 
 [[package]]
