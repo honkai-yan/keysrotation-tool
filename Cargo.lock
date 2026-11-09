@@ -3890,6 +3890,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "keyrotation-protocol"
+version = "0.1.0"
+dependencies = [
+ "base64 0.23.1",
+ "rand 0.10.3",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "zeroize",
+]
+
+[[package]]
 name = "khronos-egl"
 version = "6.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
