@@ -1,6 +1,8 @@
 # 构建产物
 /target
 /dist
+/server-data/
+identity.key
 
 # 测试服务器账号密码，绝不能提交
 .env
@@ -10,8 +12,7 @@
 # 本地 Claude Code 个人设置（项目共享的 settings.json 仍会提交）
 .claude/settings.local.json
 
-# 程序只在内存中保存数据库，磁盘上不应出现数据库文件；
-# 忽略误留的副本，避免加密库被提交
+# SQLite 由服务端持久化，客户端不保存数据库；避免库或副本被提交
 *.db
 *.db-journal
 *.db-wal
@@ -34,3 +35,5 @@
 *~
 
 # 注意：Cargo.lock 需要提交，本项目是可执行程序，锁定依赖版本
+
+/.local

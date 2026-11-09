@@ -1,0 +1,26 @@
+[package]
+name = "keyrotation-server"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+keyrotation-protocol = { path = "../protocol" }
+rusqlite.workspace = true
+argon2.workspace = true
+base64.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+rand.workspace = true
+zeroize = "1.8"
+keyrotation-transport = { path = "../transport", default-features = false }
+axum = "=0.8.9"
+axum-server = { version = "=0.8.0", features = ["tls-rustls"] }
+tokio = { version = "1.54", features = ["rt-multi-thread", "macros", "net", "sync", "signal"] }
+
+[dev-dependencies]
+tempfile = "3.27"
+keyrotation-transport = { path = "../transport" }
+reqwest = { version = "0.13.5", features = ["blocking"] }
+tower = { version = "0.5", features = ["util"] }
+rcgen = "=0.14.10"
