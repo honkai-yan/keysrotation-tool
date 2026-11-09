@@ -90,6 +90,17 @@ printf '%s' "$KEYROTATION_ADMIN_PASSWORD" | cargo run -p keyrotation-server -- i
 
 `.env` 的 `TEST_SERVER`、`TEST_ACCOUNT`、`TEST_PASSWORD` 仅适用于旧 OpenList 测试环境，不是新服务凭据；当前测试使用本机临时服务和合成数据。
 
+## 端到端自检
+
+`scripts/real-run.sh` 用真实旧库跑通四条链路：导入后的只读保真校验、空沙箱实例上的全部写路径（限额、幂等、字段级后提交覆盖、完整轮换与冲突）、服务端重启后的会话与操作恢复、HTTPS 明文 RPC。工装是 `cargo run --example real_run --locked -- <real|sandbox|resume|https>`，由脚本注入环境变量并管理进程与证书。
+
+```sh
+./scripts/real-run.sh            # 依次跑完四个场景
+./scripts/real-run.sh real https # 只跑指定场景
+```
+
+脚本每次把已有 `server-data/` 归档到 `.local/e2e/`，用 `.local/creds/` 下的口令（缺失则随机生成，600 权限）重建实例，结束停服并对两个库执行 `check`，同时校验旧库摘要未变。真实导入实例只读，所有写入都落在沙箱实例。测试秘密与日志只出现在被 gitignore 的 `.local/` 和 `server-data/`，不涉及 `~/.rust-keyrotation`。
+
 ## 代码与验证记录
 
 - `src/`：gpui-kit UI、API 状态、内容加密、版本化配置及串行 API worker。
