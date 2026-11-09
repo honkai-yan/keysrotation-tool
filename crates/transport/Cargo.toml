@@ -1,0 +1,18 @@
+[package]
+name = "keyrotation-transport"
+version = "0.1.0"
+edition = "2024"
+
+[features]
+default = ["client"]
+client = ["dep:reqwest"]
+
+[dependencies]
+keyrotation-protocol = { path = "../protocol" }
+snow = "=0.10.0"
+x25519-dalek = "2"
+url = "2.5.8"
+base64.workspace = true
+serde_json.workspace = true
+zeroize = "1.8"
+reqwest = { version = "0.13.5", features = ["blocking"], optional = true }
