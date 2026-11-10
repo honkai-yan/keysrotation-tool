@@ -830,17 +830,24 @@ impl App {
         }
         self.reset_tasks();
         self.clear_sensitive();
+        let status_code = match &error {
+            TransportError::Http(status) => Some(*status),
+            _ => None,
+        };
         if let Some(pending) = &mut self.pending_write {
             if let Action::Content(_, plain) = &mut pending.action {
                 *plain = None;
             }
             self.overlay = Overlay::Resolving;
             self.retry_due = Some(Instant::now() + Duration::from_secs(2));
-            self.set_status("提交结果未知，正在重连查询原操作结果");
+            self.set_status(with_http_status(
+                "提交结果未知，正在重连查询原操作结果",
+                status_code,
+            ));
         } else if self.rotation.is_some() {
             self.overlay = Overlay::Resolving;
             self.retry_due = Some(Instant::now() + Duration::from_secs(2));
-            self.set_status("轮换连接中断，等待重连");
+            self.set_status(with_http_status("轮换连接中断，等待重连", status_code));
         } else {
             self.overlay = Overlay::None;
             self.page = Page::Retry;
@@ -850,6 +857,9 @@ impl App {
                 TransportError::Channel => "安全通道校验失败，请核对地址与服务端公钥".into(),
                 TransportError::InvalidPublicKey | TransportError::MissingPublicKey => {
                     "服务端公钥或可信 CA 配置无效".into()
+                }
+                TransportError::Http(status) => {
+                    format!("服务端返回异常响应，配置已保留（HTTP {status}）")
                 }
                 _ => "网络暂时不可达，配置已保留".into(),
             });
@@ -1287,6 +1297,12 @@ impl App {
         }
     }
 }
+fn with_http_status(text: &str, status: Option<u16>) -> String {
+    match status {
+        Some(status) => format!("{text}（HTTP {status}）"),
+        None => text.to_owned(),
+    }
+}
 fn port_of(value: &str) -> String {
     url::Url::parse(value)
         .ok()
@@ -1354,6 +1370,28 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn http_status_is_reported_only_when_the_server_answered_with_one() {
+        let mut app = App::test_vault();
+        app.failure(Purpose::Info, TransportError::Http(404));
+        assert!(app.page == Page::Retry);
+        assert_eq!(app.status, "服务端返回异常响应，配置已保留（HTTP 404）");
+        app.failure(Purpose::Info, TransportError::Network);
+        assert_eq!(app.status, "网络暂时不可达，配置已保留");
+        let write = app.write_context().unwrap();
+        app.pending_write = Some(PendingWrite {
+            request: RpcRequest::new(Command::EntriesDelete { write, id: 1 }, None),
+            action: Action::Delete,
+            expired: false,
+        });
+        app.failure(Purpose::Mutation, TransportError::Http(503));
+        assert!(app.overlay == Overlay::Resolving);
+        assert_eq!(
+            app.status,
+            "提交结果未知，正在重连查询原操作结果（HTTP 503）"
+        );
+    }
 
     #[test]
     fn local_write_refresh_that_also_observes_remote_changes_clears_all_old_views() {

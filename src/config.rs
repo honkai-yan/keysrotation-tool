@@ -88,6 +88,11 @@ pub fn save_at(path: &Path, config: &Config) -> Res<()> {
         file.write_all(&bytes)?;
         file.sync_all()?;
         fs::rename(&temporary, path)?;
+        // Flushing the directory makes the rename durable on Unix. Windows has
+        // no equivalent: opening a directory without FILE_FLAG_BACKUP_SEMANTICS
+        // fails with ERROR_ACCESS_DENIED, which used to be reported after the
+        // config file had already been replaced, so the save looked rejected.
+        #[cfg(unix)]
         fs::File::open(directory)?.sync_all()?;
         Ok::<(), Box<dyn std::error::Error + Send + Sync>>(())
     })();

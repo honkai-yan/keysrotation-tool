@@ -1,7 +1,9 @@
 //! Fixed Noise NK profile, and a sequential blocking HTTP/HTTPS client.
 use base64::{Engine, engine::general_purpose::STANDARD};
+#[cfg(feature = "client")]
+use keyrotation_protocol::valid_id;
 use keyrotation_protocol::{
-    ApiError, MAX_RPC_BYTES, ResponseBody, RpcRequest, RpcResponse, VERSION, valid_id,
+    ApiError, MAX_RPC_BYTES, ResponseBody, RpcRequest, RpcResponse, VERSION,
 };
 use snow::{HandshakeState, TransportState};
 use url::Url;
@@ -19,6 +21,7 @@ pub enum TransportError {
     InvalidPublicKey,
     Channel,
     Network,
+    Http(u16),
     InvalidResponse,
     Remote(ApiError),
 }
@@ -26,6 +29,7 @@ impl std::fmt::Display for TransportError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Remote(error) => write!(f, "{error}"),
+            Self::Http(status) => write!(f, "HTTP {status}"),
             other => write!(f, "{other:?}"),
         }
     }
@@ -284,6 +288,9 @@ impl Client {
                 .body(message)
                 .send()
                 .map_err(|_| TransportError::Network)?;
+            // A rejected handshake has no channel header; keep its status first
+            // so it is not reported as a malformed response.
+            success_status(&response)?;
             let id = response
                 .headers()
                 .get(CHANNEL_HEADER)
@@ -311,17 +318,27 @@ impl Client {
 }
 
 #[cfg(feature = "client")]
+fn success_status(response: &reqwest::blocking::Response) -> Result<()> {
+    match response.status() {
+        // Keep the status: 404 means the API address is wrong and 503 means the
+        // server is busy, neither of which is an unreachable network.
+        reqwest::StatusCode::OK => Ok(()),
+        status => Err(TransportError::Http(status.as_u16())),
+    }
+}
+
+#[cfg(feature = "client")]
 fn read_response(
     response: reqwest::blocking::Response,
     limit: usize,
 ) -> Result<Zeroizing<Vec<u8>>> {
     use std::io::Read;
-    if response.status() != reqwest::StatusCode::OK
-        || response
-            .content_length()
-            .is_some_and(|len| len > limit as u64)
+    success_status(&response)?;
+    if response
+        .content_length()
+        .is_some_and(|len| len > limit as u64)
     {
-        return Err(TransportError::Network);
+        return Err(TransportError::InvalidResponse);
     }
     let mut bytes = Zeroizing::new(Vec::new());
     response
@@ -416,5 +433,36 @@ mod tests {
         response.request_id = request.request_id.clone();
         response.protocol_version = 2;
         assert!(decode_response(&request, &response.encode().unwrap()).is_err());
+    }
+
+    #[cfg(feature = "client")]
+    #[test]
+    fn non_success_status_is_reported_with_its_http_code() {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = [0; 1024];
+            let _ = stream.read(&mut request);
+            stream
+                .write_all(
+                    b"HTTP/1.1 503 Service Unavailable\r\ncontent-length: 0\r\nconnection: close\r\n\r\n",
+                )
+                .unwrap();
+        });
+        let identity = Identity::generate().unwrap();
+        let mut client = Client::new(
+            Endpoint::parse(&format!("http://{address}/")).unwrap(),
+            Some(&identity.public_base64()),
+            None,
+        )
+        .unwrap();
+        // The first exchange is the Noise handshake; the canned 503 answers it.
+        let request = RpcRequest::new(keyrotation_protocol::Command::ServerInfo, None);
+        let error = client.call(&request).unwrap_err();
+        assert!(matches!(error, TransportError::Http(503)));
+        assert_eq!(error.to_string(), "HTTP 503");
+        server.join().unwrap();
     }
 }
