@@ -4,7 +4,7 @@ Rust / gpui-kit 桌面客户端，加独立 Rust API 服务端。服务端直接
 
 条目内容由客户端使用 Argon2id + AES-256-GCM 加解密，内容口令及明文不发送给服务端。HTTP 使用预先导入服务端公钥的 Noise 通道；HTTPS 使用正常校验证书的 TLS，不再额外使用 Noise。描述在服务端数据库中为明文。
 
-本轮先支持和验证 macOS，构建为普通二进制。备份、部署脚本及其他平台交付延后。原 WebDAV 客户端已被新 API 流程替代。
+本轮先支持和验证 macOS，构建为普通二进制。备份、部署脚本及其他平台交付延后。原「桌面客户端经 WebDAV 同步整库」的实现已于 2026-11-10 从仓库中删除，包括 WebDAV 协议代码、内存 SQLite、v1 配置迁移兼容层与 OpenList 凭据模板 `.env.example`；仓库内只剩新 API 这一套客户端。
 
 ## 构建与检查
 
@@ -67,7 +67,7 @@ cargo run
 
 客户端配置为 `~/.rust-keyrotation/config.json`，版本 2；Unix 目录 700、文件 600，原子写入。内容口令和 token 仍明文保存，按已确认需求依赖本地文件权限保护；服务端只存登录密码哈希和 token 摘要。
 
-旧配置仅保留地址和本地内容口令用于迁移提示，不把 OpenList 账号、密码或 token 发送给新服务。用户明确确认新 API 地址后保存新版配置，清除旧认证字段。新服务公钥与可选 CA 文件按规范化 API 地址保存。
+配置只接受版本 2，不提供 v1（WebDAV 时代）配置的迁移兼容层。版本不符或字段缺失时程序报错并保持原文件不动，提示重新填写 API 地址与内容口令；旧 OpenList 账号、密码和 token 从不发给新服务。历史版本写入的 `legacy_endpoint` 键在加载时被忽略，不会再被保存。新服务公钥与可选 CA 文件按规范化 API 地址保存。
 
 | 限额 | 数值 |
 | --- | --- |
@@ -80,7 +80,7 @@ cargo run
 
 ## 旧库导入
 
-先停止旧客户端写入，由管理员通过安全途径取得旧 `ptoolkit_keys.db` 文件，再导入到尚不存在数据库的新数据目录：
+先停止仍在运行的旧版单客户端写入（该版本的代码已不在本仓库，需从历史发布或用户环境取得），由管理员通过安全途径取得旧 `ptoolkit_keys.db` 文件，再导入到尚不存在数据库的新数据目录：
 
 ```sh
 printf '%s' "$KEYROTATION_ADMIN_PASSWORD" | cargo run -p keyrotation-server -- import --data-dir ./server-data --source PATH_TO_LEGACY_DB --username admin --password-stdin
@@ -88,7 +88,7 @@ printf '%s' "$KEYROTATION_ADMIN_PASSWORD" | cargo run -p keyrotation-server -- i
 
 导入只读打开源文件，验证完整性、表结构、盐/verifier、密文格式与限额，保留 ID、描述、密文和加密元数据。已有目标库不会被覆盖；超限明确列出 ID 并拒绝导入。服务端不知道内容口令，结构检查不能替代客户端实际解密验证。
 
-`.env` 的 `TEST_SERVER`、`TEST_ACCOUNT`、`TEST_PASSWORD` 仅适用于旧 OpenList 测试环境，不是新服务凭据；当前测试使用本机临时服务和合成数据。
+仓库不再提供 `.env.example`，也没有任何代码读取 `TEST_SERVER`、`TEST_ACCOUNT`、`TEST_PASSWORD`；这些变量只属于已退役的旧 OpenList 测试环境，本机残留的 `.env` 可以自行删除。当前测试使用本机临时服务和合成数据，真实旧库端到端验证的凭据只放在被 gitignore 的 `.local/creds/`。
 
 ## 端到端自检
 

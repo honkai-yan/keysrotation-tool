@@ -151,8 +151,6 @@ impl App {
         app.cfg_path = path;
         if let Some(error) = error {
             app.set_status(error);
-        } else if app.cfg.legacy_endpoint.is_some() {
-            app.set_status("请改为新服务 API 地址，旧 WebDAV 凭据不会用于新服务");
         } else if !app.cfg.server_url.is_empty() && !app.cfg.sym_key.is_empty() {
             app.start_connect(true);
         }
@@ -318,11 +316,6 @@ impl App {
         self.send(Purpose::Mutation, Task::Rpc(request));
     }
     pub(crate) fn start_connect(&mut self, use_token: bool) {
-        if self.cfg.legacy_endpoint.is_some() {
-            self.page = Page::Wizard;
-            self.overlay = Overlay::None;
-            return;
-        }
         let Ok(endpoint) = Endpoint::parse(&self.cfg.server_url) else {
             self.page = Page::Wizard;
             self.overlay = Overlay::None;
@@ -358,15 +351,6 @@ impl App {
                 return;
             }
         };
-        if self
-            .cfg
-            .legacy_endpoint
-            .as_ref()
-            .is_some_and(|old| Endpoint::parse(old).is_ok_and(|old| old == endpoint))
-        {
-            self.set_status("请填写新服务的 API 地址，不能继续使用旧 WebDAV 地址");
-            return;
-        }
         if self.w_key.is_empty() && self.cfg.sym_key.is_empty() {
             self.set_status("请输入对称加密密钥");
             return;
@@ -383,7 +367,6 @@ impl App {
             self.cfg.username = None;
         }
         self.cfg.server_url = endpoint.as_str().into();
-        self.cfg.legacy_endpoint = None;
         if !self.w_key.is_empty() {
             self.cfg.sym_key.zeroize();
             self.cfg.sym_key = std::mem::take(&mut self.w_key);

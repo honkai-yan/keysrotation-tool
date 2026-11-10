@@ -4,10 +4,9 @@
 /server-data/
 identity.key
 
-# 测试服务器账号密码，绝不能提交
+# 本地凭据文件，绝不能提交（历史测试服务器账密、端到端验证生成的口令）
 .env
 .env.*
-!.env.example
 
 # 本地 Claude Code 个人设置（项目共享的 settings.json 仍会提交）
 .claude/settings.local.json
@@ -20,7 +19,7 @@ identity.key
 *.sqlite
 *.sqlite3
 
-# 本地配置目录的副本，其中的对称加密口令和 WebDAV 密码是明文
+# 本地配置目录的副本，其中的内容口令与会话 token 是明文
 .rust-keyrotation/
 
 # 日志
