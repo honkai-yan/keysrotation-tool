@@ -20,7 +20,6 @@ const ADOPT_OVERLAY: Duration = Duration::from_millis(500);
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Page {
     Wizard,
-    Login,
     Initialize,
     Main,
     Retry,
@@ -104,8 +103,8 @@ pub struct App {
     pub(crate) w_key: String,
     pub(crate) w_public_key: String,
     pub(crate) w_ca_file: String,
-    pub(crate) l_user: String,
-    pub(crate) l_pass: String,
+    pub(crate) w_user: String,
+    pub(crate) w_pass: String,
     pub(crate) rows: Vec<EntryMeta>,
     pub(crate) revealed: HashMap<i64, Revealed>,
     pub(crate) edit: Option<Edit>,
@@ -133,7 +132,7 @@ impl Drop for App {
         self.worker.cancel_all();
         self.w_key.zeroize();
         self.key_buf.zeroize();
-        self.l_pass.zeroize();
+        self.w_pass.zeroize();
     }
 }
 impl App {
@@ -171,8 +170,8 @@ impl App {
                 .get(&cfg.server_url)
                 .cloned()
                 .unwrap_or_default(),
-            l_user: cfg.username.clone().unwrap_or_default(),
-            l_pass: String::new(),
+            w_user: cfg.username.clone().unwrap_or_default(),
+            w_pass: String::new(),
             url_buf: cfg.server_url.clone(),
             port_buf: port_of(&cfg.server_url),
             key_buf: String::new(),
@@ -245,7 +244,8 @@ impl App {
         self.edit = None;
         self.pending_delete = None;
         self.reading.clear();
-        self.l_pass.zeroize();
+        // The login password is not vault plaintext: it stays in its masked field
+        // so that a confirm interrupted by a network failure can be retried.
         self.w_key.zeroize();
         self.key_buf.zeroize();
     }
@@ -359,7 +359,20 @@ impl App {
             self.set_status("请输入可信的服务端公钥（base64）");
             return;
         }
-        if self.cfg.server_url != endpoint.as_str() {
+        let url_changed = self.cfg.server_url != endpoint.as_str();
+        // An empty password keeps the saved session; anything else is an explicit
+        // login, which needs both fields. A changed address always needs a login
+        // because its token belongs to the old server.
+        if url_changed || self.cfg.token.is_none() {
+            if self.w_user.trim().is_empty() || self.w_pass.is_empty() {
+                self.set_status("请输入账号和密码");
+                return;
+            }
+        } else if !self.w_pass.is_empty() && self.w_user.trim().is_empty() {
+            self.set_status("请输入账号和密码");
+            return;
+        }
+        if url_changed {
             self.reset_tasks();
             self.pending_write = None;
             self.rotation = None;
@@ -388,17 +401,45 @@ impl App {
         self.save_cfg();
         self.start_connect(true);
     }
-    pub(crate) fn login(&mut self) {
-        if self.l_user.is_empty() || self.l_pass.is_empty() {
+    /// Opens the merged configuration page with the values already on disk. The
+    /// content key and the password are never restored into the form.
+    pub(crate) fn open_config(&mut self) {
+        self.w_url = self.cfg.server_url.clone();
+        self.w_public_key = self
+            .cfg
+            .trusted_servers
+            .get(&self.cfg.server_url)
+            .cloned()
+            .unwrap_or_default();
+        self.w_ca_file = self
+            .cfg
+            .trusted_ca_files
+            .get(&self.cfg.server_url)
+            .cloned()
+            .unwrap_or_default();
+        // A typed account survives until a login stores one in the config.
+        if let Some(username) = &self.cfg.username {
+            self.w_user = username.clone();
+        }
+        self.w_key.zeroize();
+        self.w_pass.zeroize();
+        self.page = Page::Wizard;
+        self.overlay = Overlay::None;
+    }
+    fn login(&mut self) {
+        if self.w_user.is_empty() || self.w_pass.is_empty() {
+            // The connect overlay is already up when the handshake reached here.
+            self.page = Page::Wizard;
+            self.overlay = Overlay::None;
             self.set_status("请输入账号和密码");
             return;
         }
         self.overlay = Overlay::Busy;
-        let password = std::mem::take(&mut self.l_pass);
+        let password = std::mem::take(&mut self.w_pass);
         self.rpc(
             Purpose::Login,
             Command::AuthLogin {
-                username: self.l_user.clone(),
+                username: self.w_user.trim().to_owned(),
                 password,
             },
         );
@@ -493,18 +534,21 @@ impl App {
             (Purpose::Info, ResponseBody::ServerInfo(info)) => {
                 self.info = Some(info);
                 self.info_at = Instant::now();
-                if self.cfg.token.is_some() {
+                if !self.w_pass.is_empty() {
+                    self.login();
+                } else if self.cfg.token.is_some() {
                     self.rpc(Purpose::Validate, Command::AuthValidate);
                 } else {
-                    self.page = Page::Login;
+                    self.page = Page::Wizard;
                     self.overlay = Overlay::None;
+                    self.set_status("请输入账号和密码");
                 }
             }
             (Purpose::Validate, ResponseBody::Session(_)) => self.authenticated(),
             (Purpose::Login, ResponseBody::Session(session)) => {
                 self.cfg.token = session.token;
                 self.cfg.username = Some(session.username.clone());
-                self.l_user = session.username;
+                self.w_user = session.username;
                 self.save_cfg();
                 self.authenticated();
             }
@@ -784,8 +828,7 @@ impl App {
                 self.clear_sensitive();
                 self.cfg.token = None;
                 self.save_cfg();
-                self.page = Page::Login;
-                self.overlay = Overlay::None;
+                self.open_config();
                 self.auto_sync_notice.clear();
                 self.set_status("登录已失效，请重新登录");
                 return;
@@ -796,7 +839,9 @@ impl App {
                 return;
             }
             if purpose == Purpose::Login {
-                self.page = Page::Login;
+                // Keep whatever the user typed in the account field; only the
+                // password is dropped when it is sent.
+                self.page = Page::Wizard;
                 self.overlay = Overlay::None;
                 self.set_status(remote.message.clone());
                 return;
@@ -915,7 +960,7 @@ impl App {
         }
         if self.retry_due.is_some_and(|due| due <= Instant::now())
             && self.active == 0
-            && self.page != Page::Login
+            && self.page != Page::Wizard
         {
             self.retry_pending();
             return;
@@ -1128,7 +1173,8 @@ impl App {
         self.cfg.server_url = endpoint.as_str().into();
         self.cfg.token = None;
         self.cfg.username = None;
-        self.l_user.clear();
+        self.w_user.clear();
+        self.w_pass.zeroize();
         self.w_url = self.cfg.server_url.clone();
         self.w_public_key = self
             .cfg
@@ -1158,7 +1204,8 @@ impl App {
         self.cfg.sym_key.zeroize();
         self.cfg.token = None;
         self.cfg.username = None;
-        self.l_user.clear();
+        self.w_user.clear();
+        self.w_pass.zeroize();
         self.page = Page::Wizard;
         self.overlay = Overlay::None;
         self.save_cfg();
@@ -1636,10 +1683,13 @@ mod tests {
         let mut app = App::blank(cfg);
         app.cfg_path = Some(config_dir.path().join("config.json"));
         app.start_connect(true);
-        pump(&mut app, |app| app.page == Page::Login);
-        app.l_user = "admin".into();
-        app.l_pass = "synthetic-login-password".into();
-        app.login();
+        pump(&mut app, |app| {
+            app.page == Page::Wizard && app.info.is_some() && app.overlay == Overlay::None
+        });
+        assert_eq!(app.status, "请输入账号和密码");
+        app.w_user = "admin".into();
+        app.w_pass = "synthetic-login-password".into();
+        app.wizard_confirm();
         pump(&mut app, |app| app.page == Page::Initialize);
         app.initialize_vault();
         pump(&mut app, |app| {
@@ -1750,10 +1800,12 @@ mod tests {
             .insert(cfg.server_url.clone(), server.public.clone());
         let mut app = App::blank(cfg);
         app.start_connect(true);
-        pump(&mut app, |app| app.page == Page::Login);
-        app.l_user = "admin".into();
-        app.l_pass = "synthetic-login-password".into();
-        app.login();
+        pump(&mut app, |app| {
+            app.page == Page::Wizard && app.info.is_some() && app.overlay == Overlay::None
+        });
+        app.w_user = "admin".into();
+        app.w_pass = "synthetic-login-password".into();
+        app.wizard_confirm();
         pump(&mut app, |app| {
             app.page == Page::Main && app.overlay == Overlay::None
         });
@@ -1784,5 +1836,67 @@ mod tests {
         }
         assert_eq!(before, std::fs::read(&source).unwrap());
         assert_eq!(app.rows.len(), 2);
+    }
+
+    fn http_config(server: &LocalServer) -> Config {
+        let mut cfg = Config::default();
+        cfg.server_url = server.endpoint.as_str().into();
+        cfg.sym_key = "synthetic-content-key".into();
+        cfg.trusted_servers
+            .insert(cfg.server_url.clone(), server.public.clone());
+        cfg
+    }
+
+    #[test]
+    fn a_failed_login_stays_on_the_configuration_page_with_the_account_kept() {
+        let server = LocalServer::start();
+        let mut app = App::blank(http_config(&server));
+        app.start_connect(true);
+        pump(&mut app, |app| {
+            app.page == Page::Wizard && app.info.is_some() && app.overlay == Overlay::None
+        });
+        assert_eq!(app.status, "请输入账号和密码");
+        app.w_user = "admin".into();
+        app.w_pass = "wrong-synthetic-password".into();
+        app.wizard_confirm();
+        pump(&mut app, |app| {
+            app.page == Page::Wizard && app.status == "invalid login credentials"
+        });
+        assert_eq!(app.w_user, "admin");
+        assert!(app.w_pass.is_empty());
+        app.open_config();
+        assert_eq!(app.w_user, "admin");
+        assert_eq!(app.w_url, app.cfg.server_url);
+    }
+
+    #[test]
+    fn an_empty_password_reuses_the_saved_session_instead_of_logging_in_again() {
+        let server = LocalServer::start();
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("config.json");
+        let mut app = App::blank(http_config(&server));
+        app.cfg_path = Some(path.clone());
+        app.start_connect(true);
+        pump(&mut app, |app| {
+            app.page == Page::Wizard && app.info.is_some() && app.overlay == Overlay::None
+        });
+        app.w_user = "admin".into();
+        app.w_pass = "synthetic-login-password".into();
+        app.wizard_confirm();
+        pump(&mut app, |app| app.page == Page::Initialize);
+        let saved = config::load_at(&path).unwrap();
+        let token = saved.token.clone().expect("login stores a token");
+        let mut restarted = App::blank(saved);
+        restarted.cfg_path = Some(path.clone());
+        assert!(restarted.w_pass.is_empty());
+        restarted.start_connect(true);
+        pump(&mut restarted, |app| {
+            app.page == Page::Initialize && app.overlay == Overlay::None
+        });
+        assert_eq!(
+            restarted.cfg.token.as_deref(),
+            Some(token.as_str()),
+            "the saved session was reused instead of logging in again"
+        );
     }
 }

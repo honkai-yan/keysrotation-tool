@@ -129,8 +129,9 @@ impl Desktop {
                             FormField::WizardServer
                             | FormField::WizardKey
                             | FormField::WizardPublicKey
-                            | FormField::WizardCaFile => this.model.wizard_confirm(),
-                            FormField::User | FormField::Password => this.model.login(),
+                            | FormField::WizardCaFile
+                            | FormField::User
+                            | FormField::Password => this.model.wizard_confirm(),
                         },
                         InputEvent::Blur
                             if matches!(field, FormField::Server | FormField::Port) =>
@@ -201,8 +202,8 @@ impl Desktop {
             FormField::Key => &m.key_buf,
             FormField::WizardServer => &m.w_url,
             FormField::WizardKey => &m.w_key,
-            FormField::User => &m.l_user,
-            FormField::Password => &m.l_pass,
+            FormField::User => &m.w_user,
+            FormField::Password => &m.w_pass,
             FormField::WizardPublicKey => &m.w_public_key,
             FormField::WizardCaFile => &m.w_ca_file,
         }
@@ -214,8 +215,8 @@ impl Desktop {
             FormField::Key => &mut m.key_buf,
             FormField::WizardServer => &mut m.w_url,
             FormField::WizardKey => &mut m.w_key,
-            FormField::User => &mut m.l_user,
-            FormField::Password => &mut m.l_pass,
+            FormField::User => &mut m.w_user,
+            FormField::Password => &mut m.w_pass,
             FormField::WizardPublicKey => &mut m.w_public_key,
             FormField::WizardCaFile => &mut m.w_ca_file,
         }
@@ -503,13 +504,22 @@ impl Render for Desktop {
                 .flex_col()
                 .gap_4()
                 .w(px(580.))
-                .child(div().text_xl().child("配置向导"))
+                .child(div().text_xl().child("服务器配置"))
                 .child(self.form_row("服务器地址", 3))
                 .child(self.form_row("对称加密密钥", 4))
                 .child(if self.model.w_url.trim().starts_with("http://") {
                     self.form_row("可信服务端公钥", 7).into_any_element()
                 } else {
                     self.form_row("可信 CA 文件（可选）", 8).into_any_element()
+                })
+                .child(self.form_row("账号", 5))
+                .child(self.form_row("密码", 6))
+                .when(self.model.cfg.token.is_some(), |this| {
+                    this.child(
+                        div()
+                            .text_color(rgb(0x8a8074))
+                            .child("密码留空则沿用已保存的登录会话"),
+                    )
                 })
                 .child(
                     Button::new("confirm")
@@ -518,26 +528,6 @@ impl Render for Desktop {
                         .on_click(cx.listener(|this, _, _, cx| {
                             if !this.blocked() {
                                 this.model.wizard_confirm();
-                                cx.notify();
-                            }
-                        })),
-                )
-                .into_any_element(),
-            Page::Login => div()
-                .flex()
-                .flex_col()
-                .gap_4()
-                .w(px(520.))
-                .child(div().text_xl().child("登录"))
-                .child(self.form_row("账号", 5))
-                .child(self.form_row("密码", 6))
-                .child(
-                    Button::new("login")
-                        .primary()
-                        .label("登录")
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            if !this.blocked() {
-                                this.model.login();
                                 cx.notify();
                             }
                         })),
@@ -580,9 +570,7 @@ impl Render for Desktop {
                         .label("修改配置")
                         .on_click(cx.listener(|this, _, _, cx| {
                             if !this.blocked() {
-                                this.model.w_url = this.model.cfg.server_url.clone();
-                                this.model.w_key.clear();
-                                this.model.page = Page::Wizard;
+                                this.model.open_config();
                                 cx.notify();
                             }
                         })),
