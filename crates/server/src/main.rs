@@ -114,10 +114,9 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             runtime.block_on(async {
                 if is_http {
                     let listener = tokio::net::TcpListener::bind(address).await?;
+                    eprintln!("keyrotation-server listening on {address}");
                     axum::serve(listener, app)
-                        .with_graceful_shutdown(async {
-                            let _ = tokio::signal::ctrl_c().await;
-                        })
+                        .with_graceful_shutdown(shutdown_signal())
                         .await?;
                 } else {
                     let config = axum_server::tls_rustls::RustlsConfig::from_pem_file(
@@ -125,10 +124,19 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                         value("--tls-key")?,
                     )
                     .await?;
+                    let handle = axum_server::Handle::new();
+                    let shutdown = handle.clone();
+                    tokio::spawn(async move {
+                        shutdown_signal().await;
+                        shutdown.graceful_shutdown(Some(std::time::Duration::from_secs(10)));
+                    });
+                    eprintln!("keyrotation-server listening on {address} (TLS)");
                     axum_server::bind_rustls(address, config)
+                        .handle(handle)
                         .serve(app.into_make_service())
                         .await?;
                 }
+                eprintln!("keyrotation-server stopped");
                 Ok::<(), Box<dyn std::error::Error>>(())
             })?;
         }
@@ -140,6 +148,21 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         _ => return Err(usage().into()),
     }
     Ok(())
+}
+
+async fn shutdown_signal() {
+    #[cfg(unix)]
+    {
+        let mut terminate =
+            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+                .expect("install SIGTERM handler");
+        tokio::select! {
+            _ = tokio::signal::ctrl_c() => {},
+            _ = terminate.recv() => {},
+        }
+    }
+    #[cfg(not(unix))]
+    let _ = tokio::signal::ctrl_c().await;
 }
 
 fn usage() -> &'static str {

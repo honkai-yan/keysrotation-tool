@@ -27,7 +27,6 @@ pub enum Purpose {
     Validate,
     Login,
     Snapshot,
-    Poll,
     Content(i64),
     Mutation,
     Resolve,

@@ -11,6 +11,9 @@ use zeroize::Zeroizing;
 
 pub const PROFILE: &str = "Noise_NK_25519_ChaChaPoly_SHA256";
 pub const MAX_NOISE_BYTES: usize = 65_535;
+// Shared channel limits; clients renew before these server-enforced deadlines.
+pub const CHANNEL_IDLE: std::time::Duration = std::time::Duration::from_secs(300);
+pub const CHANNEL_MAX: std::time::Duration = std::time::Duration::from_secs(3600);
 pub const CHANNEL_HEADER: &str = "x-keyrotation-channel";
 pub type NoiseState = TransportState;
 
@@ -211,7 +214,25 @@ pub struct Client {
     endpoint: Endpoint,
     public: Option<[u8; 32]>,
     http: reqwest::blocking::Client,
-    channel: Option<(String, TransportState)>,
+    channel: Option<ClientChannel>,
+}
+
+#[cfg(feature = "client")]
+struct ClientChannel {
+    id: String,
+    state: TransportState,
+    created: std::time::Instant,
+    touched: std::time::Instant,
+}
+
+#[cfg(feature = "client")]
+impl ClientChannel {
+    fn needs_renewal(&self) -> bool {
+        // Account for request transit time and slightly different clock samples.
+        let margin = std::time::Duration::from_secs(30);
+        self.created.elapsed() >= CHANNEL_MAX - margin
+            || self.touched.elapsed() >= CHANNEL_IDLE - margin
+    }
 }
 
 #[cfg(feature = "client")]
@@ -255,11 +276,44 @@ impl Client {
     pub fn call(&mut self, request: &RpcRequest) -> Result<ResponseBody> {
         request.validate().map_err(TransportError::Remote)?;
         let result = self.exchange(request);
+        // Only repeat reads, never login/logout or a possibly committed mutation.
+        // A failed handshake has no channel and is not retried here.
+        let retry_read = self.endpoint.is_http()
+            && self.channel.is_some()
+            && matches!(
+                request.command,
+                keyrotation_protocol::Command::ServerInfo
+                    | keyrotation_protocol::Command::AuthValidate
+                    | keyrotation_protocol::Command::VaultMeta
+                    | keyrotation_protocol::Command::EntriesList { .. }
+                    | keyrotation_protocol::Command::EntriesReadContent { .. }
+                    | keyrotation_protocol::Command::OperationsGet { .. }
+                    | keyrotation_protocol::Command::RotationReadBatch { .. }
+                    | keyrotation_protocol::Command::RotationStatus { .. }
+            )
+            && matches!(
+                &result,
+                Err(TransportError::Http(400)
+                    | TransportError::Channel
+                    | TransportError::Network
+                    | TransportError::InvalidResponse)
+            );
         if result
             .as_ref()
             .is_err_and(|error| !matches!(error, TransportError::Remote(_)))
         {
             self.reset_channel();
+        }
+        if retry_read {
+            let retry = RpcRequest::new(request.command.clone(), request.session_token.clone());
+            let result = self.exchange(&retry);
+            if result
+                .as_ref()
+                .is_err_and(|error| !matches!(error, TransportError::Remote(_)))
+            {
+                self.reset_channel();
+            }
+            return result;
         }
         result
     }
@@ -276,7 +330,15 @@ impl Client {
                 .map_err(|_| TransportError::Network)?;
             return decode_response(request, &read_response(response, MAX_RPC_BYTES)?);
         }
+        if self
+            .channel
+            .as_ref()
+            .is_some_and(ClientChannel::needs_renewal)
+        {
+            self.reset_channel();
+        }
         if self.channel.is_none() {
+            let created = std::time::Instant::now();
             let (state, message) = initiate(
                 &self.endpoint,
                 &self.public.ok_or(TransportError::MissingPublicKey)?,
@@ -299,20 +361,28 @@ impl Client {
                 .ok_or(TransportError::InvalidResponse)?
                 .to_owned();
             let message = read_response(response, 1024)?;
-            self.channel = Some((id, finish(state, &message)?));
+            self.channel = Some(ClientChannel {
+                id,
+                state: finish(state, &message)?,
+                created,
+                touched: created,
+            });
         }
-        let (id, state) = self.channel.as_mut().ok_or(TransportError::Channel)?;
-        let message = encrypt(state, &bytes)?;
+        let channel = self.channel.as_mut().ok_or(TransportError::Channel)?;
+        let sent_at = std::time::Instant::now();
+        let message = encrypt(&mut channel.state, &bytes)?;
         let response = self
             .http
             .post(self.endpoint.join("api/v1/channel/message")?)
             .header("content-type", "application/octet-stream")
-            .header(CHANNEL_HEADER, id.as_str())
+            .header(CHANNEL_HEADER, channel.id.as_str())
             .body(message)
             .send()
             .map_err(|_| TransportError::Network)?;
         let message = read_response(response, MAX_RPC_BYTES + 16)?;
-        let payload = decrypt(state, &message)?;
+        let payload = decrypt(&mut channel.state, &message)?;
+        // Use send time conservatively: the server touches its channel later.
+        channel.touched = sent_at;
         decode_response(request, &payload)
     }
 }
@@ -463,6 +533,253 @@ mod tests {
         let error = client.call(&request).unwrap_err();
         assert!(matches!(error, TransportError::Http(503)));
         assert_eq!(error.to_string(), "HTTP 503");
+        server.join().unwrap();
+    }
+    // Real TCP + Noise exchanges with a scripted peer; no user files or credentials.
+    #[cfg(feature = "client")]
+    struct Peer {
+        listener: std::net::TcpListener,
+        endpoint: Endpoint,
+        identity: Identity,
+    }
+    #[cfg(feature = "client")]
+    impl Peer {
+        fn new() -> Self {
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            listener.set_nonblocking(true).unwrap();
+            Self {
+                endpoint: Endpoint::parse(&format!("http://{}/", listener.local_addr().unwrap()))
+                    .unwrap(),
+                listener,
+                identity: Identity::generate().unwrap(),
+            }
+        }
+        fn client(&self) -> Client {
+            Client::new(
+                self.endpoint.clone(),
+                Some(&self.identity.public_base64()),
+                None,
+            )
+            .unwrap()
+        }
+        fn request(&self) -> (std::net::TcpStream, String, Vec<u8>) {
+            use std::io::Read;
+            let until = std::time::Instant::now() + std::time::Duration::from_secs(10);
+            let mut stream = loop {
+                match self.listener.accept() {
+                    Ok((stream, _)) => break stream,
+                    Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                        assert!(std::time::Instant::now() < until, "peer request timed out");
+                        std::thread::sleep(std::time::Duration::from_millis(2));
+                    }
+                    Err(e) => panic!("{e}"),
+                }
+            };
+            stream
+                .set_read_timeout(Some(std::time::Duration::from_secs(10)))
+                .unwrap();
+            let mut header = Vec::new();
+            while !header.ends_with(b"\r\n\r\n") {
+                let mut byte = [0];
+                stream.read_exact(&mut byte).unwrap();
+                header.push(byte[0]);
+                assert!(header.len() < 8192);
+            }
+            let header = String::from_utf8(header).unwrap();
+            let len: usize = header
+                .lines()
+                .find_map(|line| {
+                    let (key, value) = line.split_once(':')?;
+                    key.eq_ignore_ascii_case("content-length")
+                        .then(|| value.trim().parse().unwrap())
+                })
+                .unwrap();
+            let mut body = vec![0; len];
+            stream.read_exact(&mut body).unwrap();
+            (stream, header, body)
+        }
+        fn respond(mut stream: std::net::TcpStream, status: u16, extra: &str, body: &[u8]) {
+            use std::io::Write;
+            write!(
+                stream,
+                "HTTP/1.1 {status} Reply\r\ncontent-length: {}\r\nconnection: close\r\n{extra}\r\n",
+                body.len()
+            )
+            .unwrap();
+            stream.write_all(body).unwrap();
+        }
+        fn handshake(&self) -> TransportState {
+            let (stream, header, body) = self.request();
+            assert!(header.starts_with("POST /api/v1/channel/handshake "));
+            let (state, response) = accept(&self.endpoint, &self.identity, &body).unwrap();
+            Self::respond(
+                stream,
+                200,
+                &format!(
+                    "{CHANNEL_HEADER}: {}\r\n",
+                    keyrotation_protocol::random_id()
+                ),
+                &response,
+            );
+            state
+        }
+        fn rpc(
+            &self,
+            state: &mut TransportState,
+            result: std::result::Result<ResponseBody, ApiError>,
+        ) -> RpcRequest {
+            let (stream, header, body) = self.request();
+            assert!(header.starts_with("POST /api/v1/channel/message "));
+            let request = RpcRequest::decode(&decrypt(state, &body).unwrap()).unwrap();
+            let response = RpcResponse::new(request.request_id.clone(), result)
+                .encode()
+                .unwrap();
+            Self::respond(stream, 200, "", &encrypt(state, &response).unwrap());
+            request
+        }
+    }
+
+    #[cfg(feature = "client")]
+    #[test]
+    fn requests_renew_idle_and_absolute_expiry_without_replacing_the_token() {
+        let peer = Peer::new();
+        let mut client = peer.client();
+        let server = std::thread::spawn(move || {
+            let mut state = peer.handshake();
+            for _ in 0..2 {
+                let request = peer.rpc(&mut state, Ok(ResponseBody::LoggedOut));
+                assert_eq!(request.session_token.as_deref(), Some("synthetic-token"));
+            }
+            for _ in 0..2 {
+                let mut state = peer.handshake();
+                let request = peer.rpc(&mut state, Ok(ResponseBody::LoggedOut));
+                assert_eq!(request.session_token.as_deref(), Some("synthetic-token"));
+            }
+        });
+        let request = RpcRequest::new(
+            keyrotation_protocol::Command::AuthValidate,
+            Some("synthetic-token".into()),
+        );
+        client.call(&request).unwrap();
+        let original = client.channel.as_ref().unwrap().id.clone();
+        client.call(&request).unwrap();
+        assert_eq!(
+            client.channel.as_ref().unwrap().id,
+            original,
+            "live channel is reused"
+        );
+        client.channel.as_mut().unwrap().touched -= CHANNEL_IDLE;
+        client.call(&request).unwrap();
+        assert_ne!(client.channel.as_ref().unwrap().id, original);
+        client.channel.as_mut().unwrap().created -= CHANNEL_MAX;
+        client.call(&request).unwrap();
+        server.join().unwrap();
+    }
+
+    #[cfg(feature = "client")]
+    #[test]
+    fn lost_channel_read_retries_once_with_new_request_id_and_original_token() {
+        let peer = Peer::new();
+        let mut client = peer.client();
+        let server = std::thread::spawn(move || {
+            let mut state = peer.handshake();
+            peer.rpc(&mut state, Ok(ResponseBody::LoggedOut));
+            let (stream, _, body) = peer.request();
+            let failed = RpcRequest::decode(&decrypt(&mut state, &body).unwrap()).unwrap();
+            Peer::respond(stream, 400, "", b"channel failed");
+            let mut state = peer.handshake();
+            let retried = peer.rpc(&mut state, Ok(ResponseBody::LoggedOut));
+            assert_ne!(failed.request_id, retried.request_id);
+            assert_eq!(failed.session_token, retried.session_token);
+        });
+        let request = RpcRequest::new(
+            keyrotation_protocol::Command::AuthValidate,
+            Some("synthetic-token".into()),
+        );
+        client.call(&request).unwrap();
+        client.call(&request).unwrap();
+        server.join().unwrap();
+    }
+
+    #[cfg(feature = "client")]
+    #[test]
+    fn persistent_channel_failure_stops_after_one_read_retry() {
+        let peer = Peer::new();
+        let mut client = peer.client();
+        let server = std::thread::spawn(move || {
+            for _ in 0..2 {
+                let _state = peer.handshake();
+                let (stream, _, _) = peer.request();
+                Peer::respond(stream, 400, "", b"channel failed");
+            }
+        });
+        assert!(matches!(
+            client.call(&RpcRequest::new(
+                keyrotation_protocol::Command::ServerInfo,
+                None
+            )),
+            Err(TransportError::Http(400))
+        ));
+        assert!(client.channel.is_none());
+        server.join().unwrap();
+    }
+
+    #[cfg(feature = "client")]
+    #[test]
+    fn login_logout_and_mutations_are_not_replayed_and_session_expiry_is_not_retried() {
+        use keyrotation_protocol::{Command, ErrorCode, WriteContext};
+        let commands = [
+            Command::AuthLogin {
+                username: "synthetic".into(),
+                password: "synthetic".into(),
+            },
+            Command::AuthLogout,
+            Command::EntriesDelete {
+                write: WriteContext {
+                    operation_id: keyrotation_protocol::random_id(),
+                    generation: keyrotation_protocol::random_id(),
+                    key_epoch: 1,
+                    valid_until: 100,
+                },
+                id: 1,
+            },
+        ];
+        for command in commands {
+            let peer = Peer::new();
+            let mut client = peer.client();
+            let server = std::thread::spawn(move || {
+                let _state = peer.handshake();
+                let (stream, _, _) = peer.request();
+                Peer::respond(stream, 400, "", b"channel failed");
+            });
+            assert!(matches!(
+                client.call(&RpcRequest::new(command, None)),
+                Err(TransportError::Http(400))
+            ));
+            server.join().unwrap();
+        }
+        let peer = Peer::new();
+        let mut client = peer.client();
+        let server = std::thread::spawn(move || {
+            let mut state = peer.handshake();
+            peer.rpc(
+                &mut state,
+                Err(ApiError {
+                    code: ErrorCode::SessionExpired,
+                    message: "expired".into(),
+                }),
+            );
+        });
+        assert!(matches!(
+            client.call(&RpcRequest::new(
+                Command::AuthValidate,
+                Some("synthetic-token".into())
+            )),
+            Err(TransportError::Remote(ApiError {
+                code: ErrorCode::SessionExpired,
+                ..
+            }))
+        ));
         server.join().unwrap();
     }
 }

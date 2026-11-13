@@ -678,3 +678,85 @@ fn rotation_is_atomic_rejects_partial_batches_and_conflicts_and_handles_empty_va
     .unwrap();
     assert_eq!(repo.meta().unwrap().key_epoch, 3);
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn restarted_server_rebuilds_lost_noise_channel_and_keeps_persisted_session() {
+    let directory = tempfile::tempdir().unwrap();
+    drop(Repository::create(directory.path(), "admin", "synthetic-restart-password").unwrap());
+    let identity = Arc::new(Identity::generate().unwrap());
+    let first_listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = first_listener.local_addr().unwrap();
+    let endpoint = Endpoint::parse(&format!("http://{address}/")).unwrap();
+    let client_endpoint = endpoint.clone();
+    let public = identity.public_base64();
+    let mut client = Some(
+        tokio::task::spawn_blocking(move || {
+            Client::new(client_endpoint, Some(&public), None).unwrap()
+        })
+        .await
+        .unwrap(),
+    );
+    let mut token: Option<String> = None;
+    let mut listener = Some(first_listener);
+    for phase in 0..2 {
+        let socket = listener
+            .take()
+            .unwrap_or_else(|| std::net::TcpListener::bind(address).unwrap());
+        socket.set_nonblocking(true).unwrap();
+        let app = http::router(
+            endpoint.clone(),
+            Some(identity.clone()),
+            dispatcher(DbWorker::open(directory.path()).unwrap()),
+        )
+        .unwrap();
+        let handle = axum_server::Handle::new();
+        let shutdown = handle.clone();
+        let server = tokio::spawn(async move {
+            axum_server::from_tcp(socket)
+                .unwrap()
+                .handle(handle)
+                .serve(app.into_make_service())
+                .await
+                .unwrap();
+        });
+        shutdown.listening().await.unwrap();
+        let mut current = client.take().unwrap();
+        let saved_token = token.take();
+        let (returned, session_token) = tokio::task::spawn_blocking(move || {
+            if phase == 0 {
+                let ResponseBody::Session(session) = current
+                    .call(&RpcRequest::new(
+                        Command::AuthLogin {
+                            username: "admin".into(),
+                            password: "synthetic-restart-password".into(),
+                        },
+                        None,
+                    ))
+                    .unwrap()
+                else {
+                    panic!("login")
+                };
+                (current, session.token.unwrap())
+            } else {
+                let token = saved_token.unwrap();
+                let ResponseBody::Session(session) = current
+                    .call(&RpcRequest::new(Command::AuthValidate, Some(token.clone())))
+                    .unwrap()
+                else {
+                    panic!("validate")
+                };
+                assert_eq!(session.username, "admin");
+                (current, token)
+            }
+        })
+        .await
+        .unwrap();
+        client = Some(returned);
+        token = Some(session_token);
+        shutdown.shutdown();
+        server.await.unwrap();
+    }
+    tokio::task::spawn_blocking(move || drop(client))
+        .await
+        .unwrap();
+}

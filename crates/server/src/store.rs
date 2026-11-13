@@ -153,6 +153,8 @@ impl Repository {
             // hard_link is atomic and fails if a competing init already installed
             // the target. rename() alone could overwrite that other database.
             fs::hard_link(&temp, data_dir.join(DB_NAME)).map_err(storage_error)?;
+            // Windows cannot open a directory with File::open for fsync.
+            #[cfg(unix)]
             fs::File::open(data_dir)
                 .and_then(|directory| directory.sync_all())
                 .map_err(storage_error)?;

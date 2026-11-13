@@ -4151,6 +4151,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "keyrotation-e2e"
+version = "0.1.0"
+dependencies = [
+ "aes-gcm 0.11.1",
+ "argon2",
+ "base64 0.23.1",
+ "keyrotation-protocol",
+ "keyrotation-transport",
+ "rand 0.10.3",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "url",
+]
+
+[[package]]
 name = "keyrotation-protocol"
 version = "0.1.0"
 dependencies = [

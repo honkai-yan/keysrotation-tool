@@ -95,3 +95,33 @@ M4 之后仓库里只剩新 API 一套客户端，但仍留着当年为切换准
 ## 运行入口
 
 桌面：`cargo run`。服务端：`cargo run -p keyrotation-server -- --help`。管理员初始化、HTTP 本机运行和旧库导入的完整命令见 [README](../README.md)。管理员操作使用受控 stdin 输入密码，当前 CLI 不接受密码参数；管理数据修改需停止服务后执行。
+
+
+## 2026-11-12：取消轮询与 HTTP 通道自动恢复
+
+- 删除主页 2 秒版本轮询、焦点调度、自动同步专用 500ms 遮罩及右侧提示；保留 UI 定时器处理后台结果、明文到期与未知写入恢复。启动/重连、普通写入和轮换成功仍加载快照；过时内容读取触发按需刷新，未决写入优先。
+- 通道期限由客户端/服务端共享。客户端发送前按单调时钟检查空闲/绝对期限，提前 30 秒重建；不续期 token。安全读取遇到通道失败最多重试一次，使用新 request_id、原 token；登录/退出/业务写入不自动重发。
+- 本机 Windows 执行 `cargo test --workspace --lib --bins --tests -- --skip store::tests::deleted_or_replaced_open_database_stops_requests`：**50 项通过**（协议 4、服务端库 11、真实 API 合同 4、传输层 9、客户端/GUI 22），1 项原有测试被显式过滤。该测试要求打开 SQLite 时可改名，Windows 在改名步骤返回共享冲突（OS error 32）；未把它算作通过。
+- 通道寿命测试通过调整测试对象的单调时间戳跨越空闲 5 分钟和绝对 1 小时边界，再执行真实 TCP + Noise 交换，不以实际等待一小时验证。覆盖健康通道复用、自动重建、通道丢失读重试、新 request_id/原 token、持续失败停止重试、会话失效不重试、登录/退出/写入不盲目重发。
+- 真实 API 测试使用临时目录中的合成 SQLite、独立 config.json 和回环随机端口：空闲 2.2 秒服务端请求计数不变；外部修改后旧内容读取触发快照刷新；写入事务提交后故意破坏响应 request_id，客户端查询原 operation_id，最终只有一条新增且 revision 只增一次；服务端关闭重启后原客户端自动重建通道并复用持久化 token。原有 HTTP+Noise/受信 HTTPS、CRUD、幂等、轮换与 GUI 状态测试同时通过。
+- 测试未读取真实用户配置、`.local/ptoolkit_keys.db` 或真实凭据；临时服务正常停止，配置和数据库由 TempDir 管理。未做 macOS 原生实机验收。
+- 配套修复：服务端数据库安装后的目录 fsync 仅 Unix 执行；原有编辑 GUI 测试在 Windows/Linux 用 Ctrl+A、macOS 用 Cmd+A。`cargo fmt --all --check` 与 `git diff --check` 通过。
+- 原有 `examples/real_run.rs` 包含未加条件编译的 Unix 权限 API，Windows 上 `cargo test --workspace` 会先在示例编译处失败；本次明确选择库/二进制/集成测试目标，不修改真实旧库实跑脚本，也不将它计为已执行。
+
+
+## 2026-11-12：systemd 与 Debian 隔离全链路
+
+新增 `deploy/systemd/keyrotation-server.service`、`server.env.example` 和 `scripts/keyrotation-server-service.sh`：专用非 root 用户、4233 默认监听、独立 EnvironmentFile/StateDirectory、on-failure 每 2 秒恢复、60 秒五次启动限流、journal 与基本沙箱限制。服务端 HTTP/HTTPS 加入 SIGTERM/SIGINT 的正常停服处理及无秘密的生命周期日志。
+
+为避免在 Debian 构建桌面 GUI，新增工作区 `tools/e2e` 包复用 `examples/real_run.rs`；增加合成旧库 fixture、随机端口及管理员重置验证入口，保持原真实旧库脚本及其数据不动。`scripts/wsl-build-test.sh` 只复制源码至独立 Linux 工作目录，`scripts/test-systemd.sh` 创建临时状态目录和单元并保证 EXIT 清理。
+
+验收：WSL2 Debian 13.5 下 Rust 协议/服务端/传输 29 项全通过；Windows 客户端/GUI 25 项全通过。systemd 脚本 21 个检查点和其中六个协议场景 120 项全部通过；真实 SIGKILL 自动恢复、HTTP/HTTPS 正常 stop、持久 token/数据/操作、错误配置限流与修复恢复均有实测。临时资源清理完成。完整表、报告位置与边界见 [systemd 测试覆盖](systemd-test-coverage.md)。
+
+本轮没有终止 Debian 或重启 Windows；自启动通过实际 enable 链接和独立 target 启动事务验证。没有声称完成 macOS 原生实机、断电/磁盘满或十万条极限负载验证。此前文档记载的 Windows-only 跳过项已由此次 Linux 全量服务端测试补齐；`real_run` 的 Unix 权限语句现有条件编译，Windows 示例编译不再因该句失败。
+
+
+## 2026-11-13：一键 systemd 安装器
+
+新增 `scripts/install-service.sh`，默认创建 keyrotation 非登录系统用户、监听 0.0.0.0:4233、显式首次 init、安装/启用/启动服务并等待真实 PID 的监听。支持普通用户自动构建后 sudo、--binary、端口和 HTTPS；既有默认数据/身份/账号不重置，重复安装保留未指定地址/端口/TLS。更新失败恢复原部署文件与服务启用/运行状态，保留数据库；不会自动接管其它路径的库。
+
+新增真实 systemd 安装器隔离回归 `scripts/test-install-service.sh`：14 检查点及 115 业务检查通过（release 二进制），另有实际缺失 release 产物后的普通用户自动构建与 12 检查点通过记录。默认端口绑定、专用用户/权限、重复安装 SHA-256/UID 不变、token/operation 恢复、端口变更、崩溃重启、端口占用回滚、TLS 文件权限与重复安装全部实测。Linux 29 项协议/服务端/传输回归通过。详见 [安装覆盖表](systemd-test-coverage.md)。临时账号/单元/配置/数据库均清理；未安装正式实例。

@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2024"
 
 [workspace]
-members = [".", "crates/protocol", "crates/server", "crates/transport"]
+members = [".", "crates/protocol", "crates/server", "crates/transport", "tools/e2e"]
 default-members = ["."]
 resolver = "3"
 

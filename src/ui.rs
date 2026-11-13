@@ -151,11 +151,10 @@ impl Desktop {
                     .timer(Duration::from_millis(50))
                     .await;
                 if weak
-                    .update_in(cx, |this, window, cx| {
+                    .update_in(cx, |this, _window, cx| {
                         let previous_overlay = this.model.overlay;
                         let previous_reveals = this.model.revealed.len();
                         let mut changed = false;
-                        this.model.focused = window.is_window_active();
                         while let Some(event) = this.model.worker.try_recv() {
                             changed = true;
                             this.model.handle_event(event);
@@ -166,10 +165,10 @@ impl Desktop {
                         if this.model.edit.is_none() {
                             this.editor = None;
                         }
-                        let flashing = [this.model.status_flash, this.model.auto_flash]
-                            .into_iter()
-                            .flatten()
-                            .any(|start| start.elapsed() <= Duration::from_millis(450));
+                        let flashing = this
+                            .model
+                            .status_flash
+                            .is_some_and(|start| start.elapsed() <= Duration::from_millis(450));
                         if changed
                             || previous_overlay != this.model.overlay
                             || previous_reveals != this.model.revealed.len()
@@ -646,11 +645,7 @@ impl Render for Desktop {
                                         ),
                                 )
                             }),
-                    )
-                    .child(Self::notice(
-                        self.model.auto_sync_notice.clone(),
-                        self.model.auto_flash,
-                    )),
+                    ),
             );
         if self.model.overlay != Overlay::None || self.model.pending_delete.is_some() {
             let mut overlay = div()
@@ -735,19 +730,26 @@ impl Render for Desktop {
                             div()
                                 .flex()
                                 .gap_3()
-                                .child(Button::new("cancel-delete").label("取消").on_click(
-                                    cx.listener(|this, _, _, cx| {
-                                        this.model.pending_delete = None;
-                                        cx.notify();
-                                    }),
-                                ))
-                                .child(Button::new("delete").danger().label("删除").on_click(
-                                    cx.listener(move |this, _, _, cx| {
-                                        this.model.pending_delete = None;
-                                        this.model.delete_row(id);
-                                        cx.notify();
-                                    }),
-                                )),
+                                .child(
+                                    Button::new("cancel-delete")
+                                        .debug_selector(|| "cancel-delete".into())
+                                        .label("取消")
+                                        .on_click(cx.listener(|this, _, _, cx| {
+                                            this.model.pending_delete = None;
+                                            cx.notify();
+                                        })),
+                                )
+                                .child(
+                                    Button::new("delete")
+                                        .debug_selector(|| "confirm-delete".into())
+                                        .danger()
+                                        .label("删除")
+                                        .on_click(cx.listener(move |this, _, _, cx| {
+                                            this.model.pending_delete = None;
+                                            this.model.delete_row(id);
+                                            cx.notify();
+                                        })),
+                                ),
                         ),
                 );
             }
@@ -852,7 +854,11 @@ mod tests {
                 view.reconcile(window, cx);
             })
         });
-        cx.simulate_keystrokes("cmd-a");
+        cx.simulate_keystrokes(if cfg!(target_os = "macos") {
+            "cmd-a"
+        } else {
+            "ctrl-a"
+        });
         cx.simulate_input("changed synthetic secret");
         cx.simulate_keystrokes("enter");
         view.update(cx, |view, _| {
@@ -974,5 +980,45 @@ mod tests {
         });
         cx.simulate_keystrokes("cmd-q");
         assert_eq!(calls.get(), 4, "delete confirmation must not trap quit");
+    }
+    #[gpui_kit::test]
+    fn delete_confirmation_cancel_preserves_row_and_confirm_submits(cx: &mut TestAppContext) {
+        use crate::app::Overlay;
+        use gpui_kit::Modifiers;
+        cx.update(gpui_kit::init);
+        let (view, cx) =
+            cx.add_window_view(|window, cx| Desktop::with_model(Model::test_vault(), window, cx));
+        view.update(cx, |view, cx| {
+            view.model.pending_delete = Some(view.model.rows[0].id);
+            cx.notify();
+        });
+        cx.run_until_parked();
+        let cancel = cx
+            .debug_bounds("cancel-delete")
+            .expect("cancel button")
+            .center();
+        cx.simulate_click(cancel, Modifiers::default());
+        view.update(cx, |view, cx| {
+            assert!(view.model.pending_delete.is_none());
+            assert_eq!(view.model.rows.len(), 1);
+            assert!(view.model.overlay == Overlay::None);
+            view.model.pending_delete = Some(view.model.rows[0].id);
+            cx.notify();
+        });
+        cx.run_until_parked();
+        let confirm = cx
+            .debug_bounds("confirm-delete")
+            .expect("confirm button")
+            .center();
+        cx.simulate_click(confirm, Modifiers::default());
+        view.update(cx, |view, _| {
+            assert!(view.model.pending_delete.is_none());
+            assert!(view.model.overlay == Overlay::Busy);
+            assert_eq!(
+                view.model.rows.len(),
+                1,
+                "wait for server confirmation before removing row"
+            );
+        });
     }
 }

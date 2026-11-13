@@ -1,7 +1,7 @@
 //! 本机真实运行验证脚本。
 //!
 //! 该文件是测试工装，不属于交付代码：真实旧库实例只读校验、空实例写入全套业务、
-//! 重启恢复与 HTTPS 通道各跑一遍。用法见 `run_e2e.sh`。
+//! 重启恢复与 HTTPS 通道各跑一遍。用法见 `scripts/real-run.sh` 与 `scripts/test-systemd.sh`。
 //!
 //! ```text
 //! cargo run --example real_run --locked -- real
@@ -1340,6 +1340,7 @@ fn scenario_sandbox(report: &mut Report) -> Result<(), Boxed> {
     };
     let path = env("RK_RESUME_FILE");
     std::fs::write(&path, serde_json::to_vec(&state)?).map_err(|_| "写入重启状态失败")?;
+    #[cfg(unix)]
     std::fs::set_permissions(&path, std::os::unix::fs::PermissionsExt::from_mode(0o600))?;
     report.check("重启校验状态已保存", true);
     Ok(())
@@ -1559,13 +1560,67 @@ fn scenario_https(report: &mut Report) -> Result<(), Boxed> {
     Ok(())
 }
 
+// Synthetic legacy fixture: never reads the user's old database.
+fn scenario_fixture(report: &mut Report) -> Result<(), Boxed> {
+    let path = env("RK_LEGACY_DB");
+    if std::path::Path::new(&path).exists() {
+        return Err("fixture destination already exists".into());
+    }
+    let pass = secret(&env("RK_CONTENT_PASS_FILE"));
+    let encryption = fresh_encryption(&pass);
+    let key = derive_key(&pass, &STANDARD.decode(&encryption.salt)?);
+    let conn = Connection::open(&path)?;
+    conn.execute_batch("CREATE TABLE meta(key TEXT PRIMARY KEY,value BLOB NOT NULL); CREATE TABLE entries(id INTEGER PRIMARY KEY,desc TEXT NOT NULL,content TEXT NOT NULL);")?;
+    conn.execute(
+        "INSERT INTO meta VALUES ('salt',?1)",
+        [STANDARD.decode(&encryption.salt)?],
+    )?;
+    conn.execute(
+        "INSERT INTO meta VALUES ('verifier',?1)",
+        [encryption.verifier.as_bytes()],
+    )?;
+    for id in [1, 42, 99] {
+        conn.execute(
+            "INSERT INTO entries VALUES (?1,?2,?3)",
+            rusqlite::params![
+                id,
+                format!("synthetic entry {id}"),
+                encrypt(&key, &format!("synthetic content {id}"))?
+            ],
+        )?;
+    }
+    #[cfg(unix)]
+    std::fs::set_permissions(&path, std::os::unix::fs::PermissionsExt::from_mode(0o600))?;
+    report.check("合成旧库已创建", true);
+    Ok(())
+}
+
+fn scenario_admin(report: &mut Report) -> Result<(), Boxed> {
+    let state: ResumeState =
+        serde_json::from_str(&std::fs::read_to_string(env("RK_RESUME_FILE"))?)?;
+    let mut api = Api::connect(&state.url, Some(&state.public_key), None)?;
+    api.refresh()?;
+    api.token = Some(state.token.clone());
+    report.check("重置管理员密码后旧 token 已撤销", matches!(api.call(Command::AuthValidate), Err(TransportError::Remote(error)) if matches!(error.code, ErrorCode::Unauthenticated | ErrorCode::SessionExpired)));
+    api.login(&env("RK_USER"), &secret(&env("RK_PASS_FILE")))?;
+    report.check("新管理员密码可以登录", true);
+    Ok(())
+}
+
 fn main() {
+    if std::env::args().nth(1).as_deref() == Some("port") {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("free port");
+        println!("{}", listener.local_addr().unwrap().port());
+        return;
+    }
     let scenario = std::env::args().nth(1).unwrap_or_else(|| {
-        eprintln!("用法: real_run <real|sandbox|resume|https>");
+        eprintln!("用法: real_run <fixture|real|sandbox|resume|https>");
         std::process::exit(2);
     });
     let mut report = Report::new();
     let result = match scenario.as_str() {
+        "fixture" => scenario_fixture(&mut report),
+        "admin" => scenario_admin(&mut report),
         "real" => scenario_real(&mut report),
         "sandbox" => scenario_sandbox(&mut report),
         "resume" => scenario_resume(&mut report),

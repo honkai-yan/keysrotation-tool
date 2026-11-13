@@ -1,0 +1,21 @@
+[package]
+name = "keyrotation-e2e"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[[bin]]
+name = "keyrotation-e2e"
+path = "../../examples/real_run.rs"
+
+[dependencies]
+keyrotation-protocol = { path = "../../crates/protocol" }
+keyrotation-transport = { path = "../../crates/transport" }
+aes-gcm = "0.11.1"
+argon2 = "0.6.0"
+base64.workspace = true
+rand.workspace = true
+rusqlite.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+url = "2.5.8"

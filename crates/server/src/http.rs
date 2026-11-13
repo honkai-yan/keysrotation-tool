@@ -9,7 +9,8 @@ use axum::{
 };
 use keyrotation_protocol::{MAX_RPC_BYTES, RpcRequest, RpcResponse, random_id, valid_id};
 use keyrotation_transport::{
-    CHANNEL_HEADER, Endpoint, Identity, MAX_NOISE_BYTES, accept, decrypt, encrypt,
+    CHANNEL_HEADER, CHANNEL_IDLE, CHANNEL_MAX, Endpoint, Identity, MAX_NOISE_BYTES, accept,
+    decrypt, encrypt,
 };
 use std::{
     collections::HashMap,
@@ -19,8 +20,6 @@ use std::{
 use tokio::sync::{Mutex, OwnedSemaphorePermit, Semaphore};
 
 pub type Dispatch = Arc<dyn Fn(RpcRequest) -> RpcResponse + Send + Sync>;
-const CHANNEL_IDLE: Duration = Duration::from_secs(300);
-const CHANNEL_MAX: Duration = Duration::from_secs(3600);
 
 struct Channel {
     noise: snow_state::State,

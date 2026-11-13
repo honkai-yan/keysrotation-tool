@@ -15,8 +15,6 @@ use std::{
 use zeroize::{Zeroize, Zeroizing};
 
 const REVEAL_TTL: Duration = Duration::from_secs(60);
-const POLL_INTERVAL: Duration = Duration::from_secs(2);
-const ADOPT_OVERLAY: Duration = Duration::from_millis(500);
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Page {
     Wizard,
@@ -88,14 +86,11 @@ struct AfterWrite {
 pub struct App {
     pub(crate) page: Page,
     pub(crate) cfg: Config,
-    pub(crate) focused: bool,
     pub(crate) worker: SyncWorker,
     pub(crate) overlay: Overlay,
     pub(crate) status: String,
     pub(crate) config_error: Option<String>,
     pub(crate) status_flash: Option<Instant>,
-    pub(crate) auto_sync_notice: String,
-    pub(crate) auto_flash: Option<Instant>,
     pub(crate) url_buf: String,
     pub(crate) port_buf: String,
     pub(crate) key_buf: String,
@@ -119,10 +114,6 @@ pub struct App {
     pending_write: Option<PendingWrite>,
     rotation: Option<PendingRotation>,
     retry_due: Option<Instant>,
-    last_poll: Instant,
-    pending_snapshot: Option<Snapshot>,
-    overlay_until: Option<Instant>,
-    remote_refresh: bool,
     after_write: Option<AfterWrite>,
     #[cfg(test)]
     fixture: Option<HashMap<i64, String>>,
@@ -176,14 +167,11 @@ impl App {
             port_buf: port_of(&cfg.server_url),
             key_buf: String::new(),
             cfg,
-            focused: false,
             worker: SyncWorker::new(),
             overlay: Overlay::None,
             status: String::new(),
             config_error: None,
             status_flash: None,
-            auto_sync_notice: String::new(),
-            auto_flash: None,
             rows: Vec::new(),
             revealed: HashMap::new(),
             edit: None,
@@ -198,10 +186,6 @@ impl App {
             pending_write: None,
             rotation: None,
             retry_due: None,
-            last_poll: Instant::now(),
-            pending_snapshot: None,
-            overlay_until: None,
-            remote_refresh: false,
             after_write: None,
             #[cfg(test)]
             fixture: None,
@@ -254,10 +238,6 @@ impl App {
         self.rows.clear();
         self.meta = None;
         self.cipher = None;
-        self.pending_snapshot = None;
-        self.overlay_until = None;
-        self.auto_sync_notice.clear();
-        self.auto_flash = None;
         self.after_write = None;
     }
     fn reset_tasks(&mut self) {
@@ -450,7 +430,7 @@ impl App {
         } else if self.rotation.is_some() {
             self.read_rotation_batch();
         } else {
-            self.load_snapshot(false);
+            self.load_snapshot();
         }
     }
     pub(crate) fn initialize_vault(&mut self) {
@@ -468,13 +448,8 @@ impl App {
             Err(error) => self.set_status(error),
         }
     }
-    fn load_snapshot(&mut self, remote: bool) {
-        self.remote_refresh = remote;
+    fn load_snapshot(&mut self) {
         self.overlay = Overlay::Busy;
-        if remote {
-            self.clear_sensitive();
-            self.overlay_until = Some(Instant::now() + ADOPT_OVERLAY);
-        }
         self.send(Purpose::Snapshot, Task::Snapshot(self.cfg.token.clone()));
     }
     pub(crate) fn handle_event(&mut self, event: Event) {
@@ -486,14 +461,7 @@ impl App {
             Err(error) => self.failure(event.purpose, error),
             Ok(Output::Snapshot(snapshot)) => {
                 if self.pending_write.is_none() {
-                    if self
-                        .overlay_until
-                        .is_some_and(|until| until > Instant::now())
-                    {
-                        self.pending_snapshot = Some(snapshot);
-                    } else {
-                        self.install_snapshot(snapshot);
-                    }
+                    self.install_snapshot(snapshot);
                 }
             }
             Ok(Output::Prepared(batch)) => {
@@ -551,18 +519,6 @@ impl App {
                 self.w_user = session.username;
                 self.save_cfg();
                 self.authenticated();
-            }
-            (Purpose::Poll, ResponseBody::VaultMeta(meta)) => {
-                if self.pending_write.is_none()
-                    && self.rotation.is_none()
-                    && self.meta.as_ref().is_none_or(|old| {
-                        old.generation != meta.generation
-                            || old.vault_revision != meta.vault_revision
-                            || old.key_epoch != meta.key_epoch
-                    })
-                {
-                    self.load_snapshot(true);
-                }
             }
             (Purpose::Content(id), ResponseBody::Content(content)) => {
                 self.reading.remove(&id);
@@ -636,7 +592,7 @@ impl App {
                     || old.key_epoch != snapshot.meta.key_epoch
                     || old.vault_revision.checked_add(1) != Some(snapshot.meta.vault_revision)
             });
-        if after.is_none() || self.remote_refresh || includes_remote_changes {
+        if after.is_none() || includes_remote_changes {
             self.clear_sensitive();
         } else {
             let old = &self.rows;
@@ -667,8 +623,6 @@ impl App {
         self.rows = snapshot.rows;
         self.page = Page::Main;
         self.overlay = Overlay::None;
-        self.overlay_until = None;
-        self.last_poll = Instant::now();
         if let Some(after) = after {
             match after.action {
                 Action::Added => {
@@ -699,11 +653,6 @@ impl App {
                 _ => {}
             }
             self.set_status("保存成功");
-        }
-        if self.remote_refresh {
-            self.auto_sync_notice = "数据库自动同步成功".into();
-            self.auto_flash = Some(Instant::now());
-            self.remote_refresh = false;
         }
     }
     fn confirm_write(&mut self, result: ApiResult<ResponseBody>) {
@@ -766,7 +715,7 @@ impl App {
                     self.cfg.sym_key = rotation.pass.to_string();
                     self.cipher = Some(Zeroizing::new(*rotation.key));
                     self.save_cfg();
-                    self.load_snapshot(false);
+                    self.load_snapshot();
                     self.set_status("密钥轮换已确认");
                 } else {
                     self.fail_rotation("轮换提交结果无效");
@@ -784,7 +733,7 @@ impl App {
                     None
                 };
                 self.after_write = Some(AfterWrite { action, receipt });
-                self.load_snapshot(false);
+                self.load_snapshot();
             }
         }
     }
@@ -829,8 +778,23 @@ impl App {
                 self.cfg.token = None;
                 self.save_cfg();
                 self.open_config();
-                self.auto_sync_notice.clear();
                 self.set_status("登录已失效，请重新登录");
+                return;
+            }
+            if matches!(purpose, Purpose::Content(_))
+                && matches!(
+                    remote.code,
+                    ErrorCode::RevisionChanged
+                        | ErrorCode::NotFound
+                        | ErrorCode::GenerationChanged
+                        | ErrorCode::KeyEpochChanged
+                )
+            {
+                self.clear_sensitive();
+                if self.pending_write.is_none() && self.rotation.is_none() {
+                    self.load_snapshot();
+                    self.set_status("服务端数据已变化，已请求重新加载");
+                }
                 return;
             }
             if remote.code == ErrorCode::VaultUninitialized && purpose == Purpose::Snapshot {
@@ -896,7 +860,6 @@ impl App {
         } else {
             self.overlay = Overlay::None;
             self.page = Page::Retry;
-            self.auto_sync_notice.clear();
             self.set_status(match error {
                 TransportError::Remote(error) => error.message,
                 TransportError::Channel => "安全通道校验失败，请核对地址与服务端公钥".into(),
@@ -948,33 +911,12 @@ impl App {
         if self.fixture.is_some() {
             return;
         }
-        if self.pending_snapshot.is_some()
-            && self
-                .overlay_until
-                .is_none_or(|until| until <= Instant::now())
-        {
-            if let Some(snapshot) = self.pending_snapshot.take() {
-                self.install_snapshot(snapshot);
-            }
-            return;
-        }
         if self.retry_due.is_some_and(|due| due <= Instant::now())
             && self.active == 0
             && self.page != Page::Wizard
         {
             self.retry_pending();
             return;
-        }
-        if self.page == Page::Main
-            && self.focused
-            && self.overlay == Overlay::None
-            && self.active == 0
-            && self.pending_write.is_none()
-            && self.rotation.is_none()
-            && self.last_poll.elapsed() >= POLL_INTERVAL
-        {
-            self.last_poll = Instant::now();
-            self.rpc(Purpose::Poll, Command::VaultMeta);
         }
     }
     pub(crate) fn expire_reveals(&mut self) {
@@ -1529,20 +1471,8 @@ mod tests {
     }
 
     #[test]
-    fn pending_mutation_defers_old_poll_and_reading_stale_content_never_reveals() {
+    fn reading_stale_content_never_reveals() {
         let mut app = App::test_vault();
-        let mut changed = app.meta.clone().unwrap();
-        changed.vault_revision += 1;
-        let write = app.write_context().unwrap();
-        app.pending_write = Some(PendingWrite {
-            request: RpcRequest::new(Command::EntriesDelete { write, id: 1 }, None),
-            action: Action::Delete,
-            expired: false,
-        });
-        app.handle_body(Purpose::Poll, ResponseBody::VaultMeta(changed));
-        assert!(!app.remote_refresh);
-        assert_eq!(app.meta.as_ref().unwrap().vault_revision, 1);
-        app.pending_write = None;
         app.rows[0].revision = 2;
         app.install_content(
             1,
@@ -1590,6 +1520,8 @@ mod tests {
         _data: tempfile::TempDir,
         endpoint: Endpoint,
         public: String,
+        requests: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+        drop_next_write_reply: std::sync::Arc<std::sync::atomic::AtomicBool>,
     }
     impl LocalServer {
         fn start() -> Self {
@@ -1621,10 +1553,25 @@ mod tests {
             let identity =
                 std::sync::Arc::new(keyrotation_transport::Identity::generate().unwrap());
             let public = identity.public_base64();
+            let requests = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let count = requests.clone();
+            let drop_next_write_reply =
+                std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let drop_reply = drop_next_write_reply.clone();
+            let dispatch = keyrotation_server::dispatcher(worker);
             let app = keyrotation_server::http::router(
                 endpoint.clone(),
                 Some(identity),
-                keyrotation_server::dispatcher(worker),
+                std::sync::Arc::new(move |request| {
+                    count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    let is_write = request.command.write().is_some();
+                    let mut response = dispatch(request);
+                    if is_write && drop_reply.swap(false, std::sync::atomic::Ordering::SeqCst) {
+                        // Corrupt the authenticated request binding after the DB committed.
+                        response.request_id = random_id();
+                    }
+                    response
+                }),
             )
             .unwrap();
             let handle = axum_server::Handle::new();
@@ -1647,6 +1594,8 @@ mod tests {
                 _data: data,
                 endpoint,
                 public,
+                requests,
+                drop_next_write_reply,
             }
         }
     }
@@ -1898,5 +1847,207 @@ mod tests {
             Some(token.as_str()),
             "the saved session was reused instead of logging in again"
         );
+    }
+    #[test]
+    fn idle_client_does_not_poll_stale_reads_refresh_and_unknown_writes_resolve_once() {
+        use std::sync::atomic::Ordering;
+        let server = LocalServer::start();
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("config.json");
+        let mut app = App::blank(http_config(&server));
+        app.cfg_path = Some(path.clone());
+        app.w_user = "admin".into();
+        app.w_pass = "synthetic-login-password".into();
+        app.start_connect(true);
+        pump(&mut app, |app| app.page == Page::Initialize);
+        app.initialize_vault();
+        pump(&mut app, |app| {
+            app.page == Page::Main && app.overlay == Overlay::None
+        });
+        let token = app.cfg.token.clone();
+        app.add_row();
+        pump(&mut app, |app| app.edit.is_some());
+        let id = app.rows[0].id;
+        app.cancel_edit();
+        let count = server.requests.load(Ordering::SeqCst);
+        let until = Instant::now() + Duration::from_millis(2200);
+        while Instant::now() < until {
+            app.tick_sync();
+            assert!(app.worker.try_recv().is_none());
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert_eq!(server.requests.load(Ordering::SeqCst), count);
+        let mut other = Scope::from_config(&app.cfg).client().unwrap();
+        let write = app.write_context().unwrap();
+        other
+            .call(&RpcRequest::new(
+                Command::EntriesUpdate {
+                    write,
+                    id,
+                    description: Some("external change".into()),
+                    content: None,
+                },
+                token.clone(),
+            ))
+            .unwrap();
+        app.reveal(id);
+        pump(&mut app, |app| {
+            app.active == 0 && app.overlay == Overlay::None
+        });
+        assert!(app.page == Page::Main);
+        assert_eq!(app.rows[0].description, "external change");
+        assert!(app.revealed.is_empty());
+        assert_eq!(app.cfg.token, token);
+        server.drop_next_write_reply.store(true, Ordering::SeqCst);
+        let before = app.meta.as_ref().unwrap().vault_revision;
+        app.add_row();
+        pump(&mut app, |app| {
+            app.pending_write.is_some() && app.overlay == Overlay::Resolving
+        });
+        let operation_id = app
+            .pending_write
+            .as_ref()
+            .unwrap()
+            .request
+            .command
+            .write()
+            .unwrap()
+            .operation_id
+            .clone();
+        app.retry_due = Some(Instant::now());
+        pump(&mut app, |app| {
+            app.pending_write.is_none() && app.overlay == Overlay::None
+        });
+        assert_eq!(
+            app.rows.len(),
+            2,
+            "the committed create must not be duplicated"
+        );
+        assert_eq!(app.meta.as_ref().unwrap().vault_revision, before + 1);
+        let response = other
+            .call(&RpcRequest::new(
+                Command::OperationsGet {
+                    generation: app.meta.as_ref().unwrap().generation.clone(),
+                    operation_id,
+                },
+                token.clone(),
+            ))
+            .unwrap();
+        assert!(matches!(
+            response,
+            ResponseBody::Operation(OperationRecord {
+                state: OperationState::Committed,
+                ..
+            })
+        ));
+        // Session expiry is distinct from channel recovery and preserves configuration.
+        app.failure(
+            Purpose::Content(id),
+            TransportError::Remote(ApiError {
+                code: ErrorCode::SessionExpired,
+                message: "expired".into(),
+            }),
+        );
+        assert!(app.page == Page::Wizard);
+        assert!(app.cfg.token.is_none());
+        assert!(!app.cfg.sym_key.is_empty());
+        assert_eq!(app.w_user, "admin");
+        assert!(app.w_pass.is_empty());
+        assert!(app.revealed.is_empty());
+        assert!(config::load_at(&path).unwrap().token.is_none());
+        assert_eq!(std::fs::read_dir(directory.path()).unwrap().count(), 1);
+    }
+
+    #[test]
+    fn stale_content_read_cannot_replace_a_pending_write() {
+        let mut app = App::test_vault();
+        let write = app.write_context().unwrap();
+        let id = write.operation_id.clone();
+        app.pending_write = Some(PendingWrite {
+            request: RpcRequest::new(Command::EntriesDelete { write, id: 1 }, None),
+            action: Action::Delete,
+            expired: false,
+        });
+        app.overlay = Overlay::Busy;
+        app.failure(
+            Purpose::Content(1),
+            TransportError::Remote(ApiError {
+                code: ErrorCode::RevisionChanged,
+                message: "stale".into(),
+            }),
+        );
+        assert_eq!(
+            app.pending_write
+                .as_ref()
+                .unwrap()
+                .request
+                .command
+                .write()
+                .unwrap()
+                .operation_id,
+            id
+        );
+        assert_eq!(app.active, 0);
+        assert!(app.overlay == Overlay::Busy);
+    }
+    #[test]
+    fn unchanged_address_keeps_session_changed_address_discards_old_results() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut app = App::test_vault();
+        app.cfg_path = Some(directory.path().join("config.json"));
+        let old_url = "http://127.0.0.1:42101/";
+        app.cfg.server_url = old_url.into();
+        app.cfg.token = Some("synthetic-token".into());
+        app.cfg.username = Some("admin".into());
+        app.cfg.trusted_servers.insert(
+            old_url.into(),
+            keyrotation_transport::Identity::generate()
+                .unwrap()
+                .public_base64(),
+        );
+        app.url_buf = old_url.into();
+        let epoch = app.worker.epoch();
+        app.apply_url();
+        assert_eq!(app.worker.epoch(), epoch);
+        assert_eq!(app.active, 0);
+        assert_eq!(app.cfg.token.as_deref(), Some("synthetic-token"));
+        app.reveal(1);
+        app.start_edit(1, Field::Content);
+        let pass = app.cfg.sym_key.clone();
+        app.url_buf = "http://127.0.0.1:42102/".into();
+        app.apply_url();
+        assert!(app.worker.epoch() > epoch);
+        assert!(app.cfg.token.is_none() && app.cfg.username.is_none());
+        assert!(app.rows.is_empty() && app.revealed.is_empty() && app.edit.is_none());
+        assert_eq!(app.cfg.sym_key, pass);
+        assert!(app.cfg.trusted_servers.contains_key(old_url));
+        assert!(app.page == Page::Wizard);
+        let status = app.status.clone();
+        app.handle_event(Event {
+            epoch,
+            purpose: Purpose::Info,
+            result: Err(TransportError::Http(400)),
+        });
+        assert_eq!(
+            app.status, status,
+            "stale response cannot alter the new endpoint state"
+        );
+        let saved = config::load_at(app.cfg_path.as_ref().unwrap()).unwrap();
+        assert!(saved.token.is_none());
+        assert_eq!(saved.server_url, "http://127.0.0.1:42102/");
+    }
+
+    #[test]
+    fn wrong_content_key_never_reveals_or_overwrites_ciphertext() {
+        let mut app = App::test_vault();
+        let original = app.fixture.as_ref().unwrap()[&1].clone();
+        app.cipher = Some(Zeroizing::new([42; 32]));
+        app.reveal(1);
+        assert!(app.revealed.is_empty());
+        assert_eq!(app.status, "内容解密失败，请核对加密密钥");
+        assert_eq!(app.fixture.as_ref().unwrap()[&1], original);
+        assert_eq!(app.active, 0);
+        app.start_edit(1, Field::Content);
+        assert!(app.edit.is_none());
     }
 }
