@@ -5,19 +5,21 @@ umask 077
 repo=$(cd "$(dirname "$0")/.." && pwd)
 script=$repo/scripts/install-service.sh
 original=("$@")
-public_url= port= binary= username=admin password_stdin=0
+public_url= port= binary= username=admin password_stdin=0 data= data_requested=0
 service=keyrotation-server account=keyrotation prefix= cert= key=
 usage() {
   cat <<'EOF'
 Usage: bash scripts/install-service.sh [--public-url http://HOST:4233/] [--port 4233]
-       [--binary PATH] [--username admin] [--password-stdin]
+       [--binary PATH] [--data-dir EXISTING_DIRECTORY] [--username admin] [--password-stdin]
        [--tls-cert PEM --tls-key PEM]
 
 Defaults: dedicated user keyrotation, IPv4 0.0.0.0:4233, service keyrotation-server.
 Without --binary, build the release server if needed (before sudo when possible).
 First installation prompts for the API URL and administrator password.
 Existing databases, identity keys and configuration are retained on reinstall.
---password-stdin reads one password line only when initializing a new database.
+--data-dir adopts an existing API server directory (database plus identity.key),
+without copying, reinitializing or resetting its administrator. Omit it on reinstall
+to retain the recorded path. --password-stdin is only for first initialization.
 
 Isolation/advanced: --install-root ABSOLUTE_PATH --service-name NAME --user NAME
 A nonempty install root requires an explicit nondefault service name and user.
@@ -28,10 +30,11 @@ while (($#)); do
   case $1 in
     -h|--help) usage; exit 0 ;;
     --password-stdin) password_stdin=1; shift ;;
-    --public-url|--port|--binary|--username|--tls-cert|--tls-key|--install-root|--service-name|--user)
+    --public-url|--port|--binary|--username|--tls-cert|--tls-key|--install-root|--service-name|--user|--data-dir)
       (($# >= 2)) || fail "$1 needs a value"
       case $1 in
         --public-url) public_url=$2 ;; --port) port=$2 ;; --binary) binary=$2 ;;
+        --data-dir) data=$2; data_requested=1 ;;
         --username) username=$2 ;; --tls-cert) cert=$2 ;; --tls-key) key=$2 ;;
         --install-root) prefix=$2 ;; --service-name) service=$2 ;; --user) account=$2 ;;
       esac
@@ -83,20 +86,42 @@ dest=$prefix/usr/local/bin/keyrotation-server
 launcher=$prefix/usr/local/libexec/keyrotation-server-service
 config_dir=$prefix/etc/keyrotation-server
 config=$config_dir/server.env
-data=$prefix/var/lib/keyrotation-server
+runtime_data=$prefix/var/lib/keyrotation-server
+data_must_exist=$data_requested
 unit_file=/etc/systemd/system/$unit
-for path in "$prefix/usr" "$prefix/usr/local" "$prefix/usr/local/bin" "$prefix/usr/local/libexec" "$prefix/etc" "$config_dir" "$config" "$prefix/var" "$prefix/var/lib" "$data" "$unit_file" "$dest" "$launcher" "$data/ptoolkit_keys.db" "$data/identity.key"; do
+for path in "$prefix/usr" "$prefix/usr/local" "$prefix/usr/local/bin" "$prefix/usr/local/libexec" "$prefix/etc" "$config_dir" "$config" "$prefix/var" "$prefix/var/lib" "$runtime_data" "$unit_file" "$dest" "$launcher"; do
   [[ ! -L $path ]] || fail "Refusing symbolic-link installation target: $path"
 done
-read_env() { sed -n "s/^$1=//p" "$config" | tail -1; }
+read_env() {
+  local value
+  value=$(sed -n "s/^$1=//p" "$config" | tail -1)
+  if [[ $value == \"*\" ]]; then value=${value:1:${#value}-2}; fi
+  printf '%s' "$value"
+}
 if [[ -f $config ]]; then
-  saved_data=$(read_env KEYROTATION_DATA_DIR)
-  [[ -z $saved_data || $saved_data == "$data" ]] || fail 'Existing config uses another data directory; keep using the manual deployment path.'
+  data_must_exist=1
+  if [[ -z $data ]]; then
+    data=$(read_env KEYROTATION_HOST_DATA_DIR)
+    [[ -n $data ]] || data=$(read_env KEYROTATION_DATA_DIR)
+  fi
   [[ -n $public_url ]] || public_url=$(read_env KEYROTATION_PUBLIC_URL)
   if [[ -z $port ]]; then
     saved_listen=$(read_env KEYROTATION_LISTEN)
     port=${saved_listen##*:}
   fi
+fi
+data=${data:-$runtime_data}
+if ((data_must_exist)); then
+  [[ -d $data ]] || fail "Data directory does not exist: $data"
+  data=$(realpath -e "$data")
+fi
+[[ $data == /* && $data != *$'\n'* && $data != *$'\r'* && $data != *$'\t'* && $data != *\"* && $data != *\\* && $data != *:* ]] || fail 'Data path must be absolute and contain no quotes, backslashes, colons or control characters'
+case $data in /|/root|/home|/var|/var/lib|/etc|/usr|/tmp|/run) fail 'Use a dedicated application data directory, not a system root' ;; esac
+for path in "$data/ptoolkit_keys.db" "$data/identity.key"; do
+  [[ ! -L $path ]] || fail "Refusing symbolic-link database or identity: $path"
+done
+if ((data_must_exist)); then
+  [[ -f $data/ptoolkit_keys.db && -f $data/identity.key ]] || fail 'Existing data directory needs both ptoolkit_keys.db and identity.key; no automatic initialization'
 fi
 port=${port:-4233}
 [[ $port =~ ^[0-9]{1,5}$ ]] && ((10#$port >= 1 && 10#$port <= 65535)) || fail 'Invalid saved port'
@@ -140,10 +165,15 @@ if [[ $fresh == 1 ]]; then
 else
   [[ -f $data/ptoolkit_keys.db && -f $data/identity.key ]] || fail 'Existing database or identity is incomplete'
 fi
+if ((data_must_exist)); then
+  # Validate before stopping an existing installation or changing file ownership.
+  "$binary" check --data-dir "$data"
+  "$binary" public-key --data-dir "$data" >/dev/null
+fi
 if id "$account" >/dev/null 2>&1; then
   [[ $(id -u "$account") != 0 ]] || fail 'Service user cannot be root'
   entry=$(getent passwd "$account")
-  [[ $(cut -d: -f6 <<<"$entry") == "$data" && $(cut -d: -f7 <<<"$entry") =~ /(nologin|false)$ ]] || fail 'Existing account is not the expected dedicated service user'
+  [[ ( $(cut -d: -f6 <<<"$entry") == "$runtime_data" || $(cut -d: -f6 <<<"$entry") == "$data" ) && $(cut -d: -f7 <<<"$entry") =~ /(nologin|false)$ ]] || fail 'Existing account is not the expected dedicated service user'
 fi
 stage=$(mktemp -d /var/tmp/keyrotation-install.XXXXXX)
 targets=("$dest" "$launcher" "$config" "$unit_file")
@@ -181,12 +211,12 @@ deploying=1
 if ((was_active)); then systemctl stop "$unit"; else systemctl stop "$unit" >/dev/null 2>&1 || true; fi
 if ! id "$account" >/dev/null 2>&1; then
   getent group "$account" >/dev/null || groupadd --system "$account"
-  useradd --system --gid "$account" --home-dir "$data" --no-create-home --shell /usr/sbin/nologin "$account"
+  useradd --system --gid "$account" --home-dir "$runtime_data" --no-create-home --shell /usr/sbin/nologin "$account"
 fi
 group=$(id -gn "$account")
 install -d -o root -g root -m 755 "$prefix/usr/local/bin" "$prefix/usr/local/libexec"
 install -d -o root -g "$group" -m 750 "$config_dir"
-install -d -o "$account" -g "$group" -m 700 "$data"
+install -d -o "$account" -g "$group" -m 700 "$runtime_data" "$data"
 atomic_install() {
   local source=$1 target=$2 mode=$3 owner=${4:-root} target_group=${5:-root} temporary
   temporary=$(mktemp "$target.install.XXXXXX")
@@ -202,10 +232,10 @@ else
   chown "$account:$group" "$data/ptoolkit_keys.db" "$data/identity.key"
   chmod 600 "$data/ptoolkit_keys.db" "$data/identity.key"
 fi
-runuser -u "$account" -- "$dest" check --data-dir "$data"
-runuser -u "$account" -- "$dest" public-key --data-dir "$data" > "$stage/public-key"
+"$dest" check --data-dir "$data"
+"$dest" public-key --data-dir "$data" > "$stage/public-key"
 if [[ -f $config ]]; then
-  grep -vE '^KEYROTATION_(BINARY|DATA_DIR|LISTEN|PUBLIC_URL)=' "$config" > "$stage/env" || true
+  grep -vE '^KEYROTATION_(BINARY|DATA_DIR|HOST_DATA_DIR|LISTEN|PUBLIC_URL)=' "$config" > "$stage/env" || true
 else
   : > "$stage/env"
 fi
@@ -216,17 +246,24 @@ if [[ -n $cert ]]; then
   atomic_install "$key" "$config_dir/server.key" 640 root "$group"
   printf 'KEYROTATION_TLS_CERT=%s\nKEYROTATION_TLS_KEY=%s\n' "$config_dir/server.pem" "$config_dir/server.key" >> "$stage/env"
 fi
-printf 'KEYROTATION_BINARY=%s\nKEYROTATION_DATA_DIR=%s\nKEYROTATION_LISTEN=0.0.0.0:%s\nKEYROTATION_PUBLIC_URL=%s\n' "$dest" "$data" "$port" "$public_url" >> "$stage/env"
+printf 'KEYROTATION_BINARY=%s\nKEYROTATION_DATA_DIR=%s\nKEYROTATION_LISTEN=0.0.0.0:%s\nKEYROTATION_PUBLIC_URL=%s\n' "$dest" "$runtime_data" "$port" "$public_url" >> "$stage/env"
+printf 'KEYROTATION_HOST_DATA_DIR="%s"\n' "$data" >> "$stage/env"
 atomic_install "$stage/env" "$config" 600
 sed -e "s|^User=.*|User=$account|" -e "s|^Group=.*|Group=$group|" \
-    -e "s|^WorkingDirectory=.*|WorkingDirectory=$data|" \
-    -e "s|^Environment=.*|Environment=KEYROTATION_DATA_DIR=$data|" \
+    -e "s|^WorkingDirectory=.*|WorkingDirectory=$runtime_data|" \
+    -e "s|^Environment=.*|Environment=KEYROTATION_DATA_DIR=$runtime_data|" \
     -e "s|^EnvironmentFile=.*|EnvironmentFile=$config|" \
     -e "s|^ExecStart=.*|ExecStart=$launcher|" \
     "$repo/deploy/systemd/keyrotation-server.service" > "$stage/$unit"
 if [[ -n $prefix ]]; then
   sed -i '/^StateDirectory=/d; /^StateDirectoryMode=/d' "$stage/$unit"
-  sed -i "/^ProtectSystem=/a ReadWritePaths=$data" "$stage/$unit"
+  sed -i "/^ProtectSystem=/a ReadWritePaths=$runtime_data" "$stage/$unit"
+fi
+if [[ $data != "$runtime_data" ]]; then
+  # Bind just the data directory into an accessible service path. This retains
+  # ProtectHome/PrivateTmp and needs no chmod/ACL changes to private ancestors.
+  unit_source=${data//%/%%}
+  printf '\n[Service]\nBindPaths="%s":"%s"\n' "$unit_source" "$runtime_data" >> "$stage/$unit"
 fi
 atomic_install "$stage/$unit" "$unit_file" 644
 systemd-analyze verify "$unit_file"

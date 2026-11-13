@@ -64,3 +64,21 @@
 最终结果：2026-11-13 的 release 二进制全流程报告 `.local/installer-reports/keyrotation-install-eb9846/` 退出码 0，14 个检查点通过、cleanup complete。业务为 sandbox 63 项、四次恢复验证各 9 项、两次 HTTPS 验证各 8 项，共 115 项。另在 `.local/installer-reports/auto-build-20261113/` 保存首次缺失 release 二进制、实际以 dacapo 编译的过程及 12 检查点/99 业务检查通过证据；没有为了复跑而删除构建缓存。Linux 核心 29 项同时回归通过。
 
 测试只创建 `kri-*` 非登录用户和 `keyrotation-install-*` 服务；正式 keyrotation 用户及服务未安装。生成口令只存在 Linux 临时目录，报告扫描未发现口令；所有测试用户/组、单元、启用链接、安装锁和临时数据库在结束时清理。Windows 客户端本轮没有代码行为变化，未重复运行 GUI 测试。
+
+
+## 接管自定义现成目录（2026-11-13）
+
+`scripts/test-install-service.sh SERVER_BINARY E2E_BINARY --existing-data` 使用 `/root/keyrotation-existing.*/existing data%vault` 下的合成目录，父目录仍 root:root/700；现场创建新 API 格式数据库和身份，作为已有数据无密码接管。
+
+| 增补用例 | 验证点 |
+| --- | --- |
+| 现成目录接管 | 不执行 init，不要求密码；数据库和身份摘要不变 |
+| 私有路径/特殊字符 | 含空格与 % 的目录可以绑定，父目录权限不变 |
+| 原地使用 | 服务挂载空间内的数据库与宿主源文件 dev/inode 一致，宿主默认目录没有数据库副本 |
+| 重复安装 | 不传 --data-dir 仍使用已记录目录，UID/身份/数据不变 |
+| 无效目录 | 不存在/不完整目录拒绝且不创建账号；损坏替换目录在停止当前服务前拒绝，PID 与配置不变 |
+| 原有安装流程 | 沿用 sandbox、会话/操作恢复、端口变更、SIGKILL、端口占用回滚及 HTTPS 完整回归 |
+
+仅修改安装和测试脚本、文档；客户端与 Rust 服务端代码未改。BindPaths 对源/目标分别引用并转义 systemd % 说明符，以保证特殊字符路径确实绑定。
+
+实测结果：现成目录模式 `.local/installer-reports/keyrotation-install-f5daf4/` **18 检查点通过**；默认目录模式 `.local/installer-reports/keyrotation-install-18d581/` **14 检查点通过**。两种模式各完成 sandbox 63 + 四次 resume 各 9 + 两次 HTTPS 各 8 = **115 项协议业务检查**。所有用例使用合成库和独立账号，结束均 `result=0 cleanup=complete`。首次发现含空格 BindPaths 整体引用会把冒号视作路径字符，已改为源/目标分别引用并完整重跑通过；没有放宽 ProtectHome 或父目录权限。

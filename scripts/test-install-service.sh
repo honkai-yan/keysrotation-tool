@@ -20,7 +20,7 @@ chmod 700 "$work/creds"
 openssl rand -hex 24 > "$work/creds/admin"
 openssl rand -hex 24 > "$work/creds/content"
 openssl rand -hex 24 > "$work/creds/new-content"
-blocker= checks=0
+blocker= checks=0 private=
 pass() { checks=$((checks + 1)); printf '[PASS] %s\n' "$*" | tee -a "$report/checks.txt"; }
 cleanup() {
   local result=$?
@@ -35,6 +35,10 @@ cleanup() {
   if getent group "$account" >/dev/null; then groupdel "$account"; fi
   [[ $work == /var/lib/keyrotation-installer.* && $(dirname "$work") == /var/lib ]] || exit 90
   rm -rf -- "$work"
+  if [[ -n $private ]]; then
+    [[ $private == /root/keyrotation-existing.* && $(dirname "$private") == /root ]] || exit 91
+    rm -rf -- "$private"
+  fi
   printf 'result=%s checks=%s cleanup=complete\n' "$result" "$checks" | tee -a "$report/checks.txt"
   printf 'Report: %s\n' "$report"
   exit "$result"
@@ -43,15 +47,37 @@ trap cleanup EXIT
 common=(--install-root "$work" --service-name "$service" --user "$account")
 if [[ ${3:-} != --auto-build ]]; then common+=(--binary "$binary"); fi
 installer=$repo/scripts/install-service.sh
-data=$work/var/lib/keyrotation-server
+runtime_data=$work/var/lib/keyrotation-server
+data=$runtime_data
+adoption=()
+if [[ ${3:-} == --existing-data ]]; then
+  private=$(mktemp -d /root/keyrotation-existing.XXXXXX)
+  data=$private/'existing data%vault'
+  mkdir "$data"
+  "$binary" init --data-dir "$data" --username admin --password-stdin < "$work/creds/admin" > "$report/existing-init.txt"
+  original_db=$(sha256sum "$data/ptoolkit_keys.db" | cut -d' ' -f1)
+  original_identity=$(sha256sum "$data/identity.key" | cut -d' ' -f1)
+  adoption=(--data-dir "$data")
+fi
 config=$work/etc/keyrotation-server/server.env
 installed=$work/usr/local/bin/keyrotation-server
 if bash "$installer" "${common[@]}" --port 0 --public-url http://127.0.0.1:4233/ > "$report/invalid-port.txt" 2>&1; then exit 1; fi
 if bash "$installer" "${common[@]}" --public-url http://0.0.0.0:4233/ > "$report/invalid-url.txt" 2>&1; then exit 1; fi
-[[ ! -e /etc/systemd/system/$unit && ! -e $data ]]
+[[ ! -e /etc/systemd/system/$unit && ! -e $runtime_data ]]
 ! getent passwd "$account" >/dev/null
 pass 'invalid input rejected before account/data/service creation'
-bash "$installer" "${common[@]}" --public-url http://127.0.0.1:4233/ --password-stdin < "$work/creds/admin" > "$report/install.txt" 2>&1
+if [[ -n $private ]]; then
+  if bash "$installer" "${common[@]}" --data-dir "$private/not-found" --public-url http://127.0.0.1:4233/ < /dev/null > "$report/missing-data.txt" 2>&1; then exit 1; fi
+  mkdir "$private/incomplete"
+  if bash "$installer" "${common[@]}" --data-dir "$private/incomplete" --public-url http://127.0.0.1:4233/ < /dev/null > "$report/incomplete-data.txt" 2>&1; then exit 1; fi
+  ! getent passwd "$account" >/dev/null
+  pass 'missing/incomplete explicit data directories rejected without initialization or account creation'
+fi
+if [[ -n $private ]]; then
+  bash "$installer" "${common[@]}" "${adoption[@]}" --public-url http://127.0.0.1:4233/ < /dev/null > "$report/install.txt" 2>&1
+else
+  bash "$installer" "${common[@]}" --public-url http://127.0.0.1:4233/ --password-stdin < "$work/creds/admin" > "$report/install.txt" 2>&1
+fi
 systemctl is-enabled --quiet "$unit"
 systemctl is-active --quiet "$unit"
 pid=$(systemctl show "$unit" -p MainPID --value)
@@ -60,6 +86,14 @@ ss -H -lntp 'sport = :4233' | grep -q "0.0.0.0:4233.*pid=$pid,"
 [[ $(getent passwd "$account" | cut -d: -f7) == /usr/sbin/nologin ]]
 [[ $(stat -c %a "$data") == 700 && $(stat -c %a "$data/ptoolkit_keys.db") == 600 && $(stat -c %a "$data/identity.key") == 600 && $(stat -c %a "$config") == 600 ]]
 pass 'first install creates dedicated system account, all-IPv4 :4233 service, permissions and enable link'
+if [[ -n $private ]]; then
+  [[ $(sha256sum "$data/ptoolkit_keys.db" | cut -d' ' -f1) == "$original_db" ]]
+  [[ $(sha256sum "$data/identity.key" | cut -d' ' -f1) == "$original_identity" ]]
+  [[ ! -e $runtime_data/ptoolkit_keys.db ]]
+  [[ $(stat -c %a "$private") == 700 && $(stat -c %U "$private") == root ]]
+  [[ $(stat -c %d:%i "$data/ptoolkit_keys.db") == $(nsenter -t "$pid" -m -- stat -c %d:%i "$runtime_data/ptoolkit_keys.db") ]]
+  pass 'existing private path with space/percent is bound directly: same inode, unchanged DB/identity, no parent permission change'
+fi
 if [[ ${3:-} == --auto-build ]]; then
   [[ -x $repo/target/release/keyrotation-server ]]
   [[ $(stat -c %U "$repo/target/release/keyrotation-server") == "${SUDO_USER:-root}" ]]
@@ -68,7 +102,7 @@ fi
 export RK_USER=admin RK_URL=http://127.0.0.1:4233/
 export RK_PASS_FILE=$work/creds/admin RK_CONTENT_PASS_FILE=$work/creds/content
 export RK_NEW_PASS_FILE=$work/creds/new-content RK_RESUME_FILE=$work/resume.json
-RK_PUBKEY=$(runuser -u "$account" -- "$installed" public-key --data-dir "$data")
+RK_PUBKEY=$("$installed" public-key --data-dir "$data")
 export RK_PUBKEY
 scenario() {
   local kind=$1 label=$2
@@ -84,6 +118,20 @@ bash "$installer" "${common[@]}" < /dev/null > "$report/reinstall.txt" 2>&1
 [[ $(sha256sum "$data/identity.key" | cut -d' ' -f1) == "$sha_key" ]]
 [[ $(id -u "$account") == "$uid" ]]
 pass 'repeat install without password or URL preserves existing database, identity, account and configuration'
+if [[ -n $private ]]; then
+  grep -Fq "KEYROTATION_HOST_DATA_DIR=\"$data\"" "$config"
+  pid=$(systemctl show "$unit" -p MainPID --value)
+  [[ $(stat -c %d:%i "$data/ptoolkit_keys.db") == $(nsenter -t "$pid" -m -- stat -c %d:%i "$runtime_data/ptoolkit_keys.db") ]]
+  pass 'reinstall without --data-dir retains the recorded external directory and binding'
+  old_env=$(sha256sum "$config" | cut -d' ' -f1)
+  mkdir "$private/corrupt"
+  cp "$data/identity.key" "$private/corrupt/identity.key"
+  printf corrupt > "$private/corrupt/ptoolkit_keys.db"
+  if bash "$installer" "${common[@]}" --data-dir "$private/corrupt" < /dev/null > "$report/corrupt-data.txt" 2>&1; then exit 1; fi
+  [[ $(systemctl show "$unit" -p MainPID --value) == "$pid" ]]
+  [[ $(sha256sum "$config" | cut -d' ' -f1) == "$old_env" ]]
+  pass 'corrupt replacement directory rejected before stopping the current service or changing config'
+fi
 scenario resume after-reinstall
 next_port=$("$probe" port)
 bash "$installer" "${common[@]}" --port "$next_port" --public-url "http://127.0.0.1:$next_port/" < /dev/null > "$report/change-port.txt" 2>&1
@@ -133,6 +181,6 @@ bash "$installer" "${common[@]}" < /dev/null > "$report/https-reinstall.txt" 2>&
 pass 'HTTPS reinstall preserves URL, TLS paths and root-owned group-readable private key'
 RK_URL=https://127.0.0.1:$next_port/ RK_CA_FILE=$work/tls/ca.pem RK_CONTENT_PASS_FILE=$RK_NEW_PASS_FILE scenario https after-https-reinstall
 systemctl stop "$unit"
-runuser -u "$account" -- "$installed" check --data-dir "$data" > "$report/final-check.txt"
+"$installed" check --data-dir "$data" > "$report/final-check.txt"
 if grep -rF -f "$work/creds/admin" -f "$work/creds/content" -f "$work/creds/new-content" "$report"; then echo 'Secret leaked to report'; exit 1; fi
 pass 'final integrity check passes and generated passwords are absent from reports'

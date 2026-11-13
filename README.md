@@ -54,7 +54,18 @@ bash scripts/install-service.sh --public-url http://192.168.1.100:4233/
 
 安装器自动创建专用非登录用户 **keyrotation**、配置 **0.0.0.0:4233**、设置目录/文件权限，安装并启用 `keyrotation-server.service`，等待真实服务 PID 监听成功，最后打印公钥及管理命令。首次数据库初始化后，内容加密库仍由客户端登录后明确初始化。
 
-重复运行会保留 `/var/lib/keyrotation-server/` 中的数据库和身份私钥；不再要求管理员密码，未指定的地址和端口沿用配置，不重置账号。更新文件前停服并备份原部署文件，启动失败会恢复原文件及此前启用/运行状态，数据始终保留。它不会搜索、移动或导入其它路径下的旧库；已有实例不在默认目录时，先停服并安排数据迁移或继续使用手动部署，避免误以为空实例是原实例。防火墙仍需自行放行端口。
+已有服务端数据目录时直接指定 `--data-dir`，例如：
+
+```bash
+bash scripts/install-service.sh --data-dir /srv/keys-data --public-url http://192.168.1.100:4233/
+# 相对路径也可以，例如 --data-dir ./server-data
+```
+
+目录内必须已有 **ptoolkit_keys.db 和 identity.key**，是新 API 服务端的数据目录；旧版单客户端只有 SQLite 的旧库仍需先 import。接管前先停止原来的手动/nohup 服务进程。安装器原地使用该目录，不复制或搬迁数据、不执行 init、不重置管理员密码或生成新身份；会将数据目录权限设为 700、库和身份文件设为 600，并交给 keyrotation 用户。数据目录缺失、不完整或校验失败会直接拒绝，不会创建空库替代。
+
+自定义路径会记录在配置里，后续再次运行安装器不必重复 `--data-dir`；未指定的地址和端口也继续沿用。`/root/...`、用户主目录下的专用子目录和带空格的路径可用（有空格时用引号），不需要放宽父目录权限。systemd 只把选定的数据目录绑定到服务内部固定路径，`KEYROTATION_HOST_DATA_DIR` 记录宿主真实路径，`KEYROTATION_DATA_DIR` 是进程内的挂载路径；二者指向同一份文件，没有整库副本。离线管理命令应在停服后由管理员针对宿主真实目录执行（例如 `sudo /usr/local/bin/keyrotation-server check --data-dir /srv/keys-data`）。
+
+不指定数据目录的首次安装仍默认使用 `/var/lib/keyrotation-server/` 并提示创建管理员；重复安装保留数据库、身份私钥和账号。更新文件前停服并备份原部署文件，启动失败会恢复原文件及此前启用/运行状态，数据始终保留。防火墙仍需自行放行端口。
 
 HTTPS 一次配置示例：
 
